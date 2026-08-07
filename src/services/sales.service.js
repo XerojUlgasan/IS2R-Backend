@@ -56,11 +56,14 @@ async function listSales(userId, businessId, filters) {
   const from = (page - 1) * limit;
   const to = from + limit - 1;
 
+  // Inner join on materials + filtering out soft-deleted materials excludes
+  // their sales entirely, so the paginated count stays accurate.
   let query = supabase
     .from("sales")
-    .select(SALE_COLUMNS, { count: "exact" })
+    .select(`${SALE_COLUMNS}, materials!inner(name, deletedAt)`, { count: "exact" })
     .eq("businessId", businessId)
-    .is("deletedAt", null);
+    .is("deletedAt", null)
+    .is("materials.deletedAt", null);
 
   if (status) query = query.eq("status", status);
   if (materialId) query = query.eq("materialId", materialId);
@@ -75,13 +78,10 @@ async function listSales(userId, businessId, filters) {
   }
 
   const sales = data || [];
-  const names = await materialService.getMaterialNamesByIds([
-    ...new Set(sales.map((s) => s.materialId)),
-  ]);
   const total = count || 0;
 
   return {
-    sales: sales.map((s) => buildSaleResponse(s, names.get(s.materialId))),
+    sales: sales.map((s) => buildSaleResponse(s, s.materials ? s.materials.name : null)),
     page,
     limit,
     total,

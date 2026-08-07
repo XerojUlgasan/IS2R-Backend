@@ -19,4 +19,23 @@ async function assertMembership(userId, businessId) {
   }
 }
 
-module.exports = { assertMembership };
+// Confirms the user owns the business; throws 403 otherwise (404 if no such business).
+async function assertOwner(userId, businessId) {
+  const { data, error } = await supabase
+    .from("business")
+    .select("ownerId")
+    .eq("id", businessId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!data) {
+    throw httpError(404, "Business not found");
+  }
+  if (data.ownerId !== userId) {
+    throw httpError(403, "Only the business owner can manage members");
+  }
+}
+
+module.exports = { assertMembership, assertOwner };

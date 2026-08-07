@@ -80,7 +80,7 @@ async function createBusiness(userId, details) {
   }
 
   // 3. Link the creator as an accepted OWNER.
-  const { error: memberError } = await supabase
+  const { data: member, error: memberError } = await supabase
     .from("business_members")
     .insert({
       userId,
@@ -88,11 +88,23 @@ async function createBusiness(userId, details) {
       role: "OWNER",
       status: "accepted",
       acceptedAt: new Date().toISOString(),
-    });
+    })
+    .select("id")
+    .single();
 
   if (memberError) {
     await deleteBusiness(businessId);
     throw new Error(memberError.message);
+  }
+
+  // 4. Grant the owner every permission via a member_actions row.
+  const { error: actionsError } = await supabase
+    .from("member_actions")
+    .insert({ memberId: member.id, businessId: business.id, ...OWNER_ACTIONS });
+
+  if (actionsError) {
+    await deleteBusiness(businessId);
+    throw new Error(actionsError.message);
   }
 
   return {
@@ -102,8 +114,23 @@ async function createBusiness(userId, details) {
   };
 }
 
+// Every member_action permission granted — the owner can do everything.
+const OWNER_ACTIONS = {
+  add_material: true,
+  update_material: true,
+  delete_material: true,
+  add_stocks: true,
+  update_stocks: true,
+  delete_stocks: true,
+  create_sales: true,
+  update_sales: true,
+  delete_sales: true,
+};
+
 // Removes a business row (used to clean up after a failed multi-step create).
+// member_actions must go first: its FK to business_members has no cascade.
 async function deleteBusiness(businessId) {
+  await supabase.from("member_actions").delete().eq("businessId", businessId);
   await supabase.from("business_settings").delete().eq("businessid", businessId);
   await supabase.from("business_members").delete().eq("businessId", businessId);
   await supabase.from("business").delete().eq("id", businessId);
