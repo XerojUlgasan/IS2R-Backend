@@ -1,6 +1,7 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
 const { assertOwner } = require("./membership.service");
+const { recordLog } = require("./audit.service");
 
 // UI permission key -> member_actions boolean column.
 const PERMISSION_TO_COLUMN = {
@@ -13,6 +14,9 @@ const PERMISSION_TO_COLUMN = {
   "sale.create": "create_sales",
   "sale.update": "update_sales",
   "sale.delete": "delete_sales",
+  "expense.create": "add_expense",
+  "expense.update": "update_expense",
+  "expense.delete": "delete_expense",
 };
 
 // member.* keys are accepted (the UI still sends them) but not stored or returned:
@@ -238,6 +242,7 @@ async function inviteMember(userId, businessId, details) {
     throw new Error(actionsError.message);
   }
 
+  recordLog(businessId, userId, "INVITE_MEMBER", `Invited ${details.email} as ${details.role}`);
   return buildMemberResponse(member, actions, user);
 }
 
@@ -256,6 +261,13 @@ async function updatePermissions(userId, businessId, memberId, permissions) {
   if (error) {
     throw new Error(error.message);
   }
+
+  recordLog(
+    businessId,
+    userId,
+    "CONFIGURE_MEMBER",
+    `Updated permissions for ${member.email || member.userId}`
+  );
 
   const users = await getUsersByIds([member.userId]);
   return buildMemberResponse(member, actions, users.get(member.userId));
@@ -288,6 +300,8 @@ async function removeMember(userId, businessId, memberId) {
   if (memberError) {
     throw new Error(memberError.message);
   }
+
+  recordLog(businessId, userId, "REMOVE_MEMBER", `Removed member ${member.email || member.userId}`);
 }
 
 module.exports = {

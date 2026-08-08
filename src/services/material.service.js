@@ -1,6 +1,7 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership } = require("./membership.service");
+const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
+const { recordLog } = require("./audit.service");
 
 const VALID_TYPES = ["PCS", "SIZE"];
 
@@ -95,7 +96,7 @@ async function listMaterials(userId, businessId) {
 
 // Creates a new material in a business. New materials start with no stock.
 async function createMaterial(userId, businessId, details) {
-  await assertMembership(userId, businessId);
+  await assertAction(userId, businessId, ACTIONS.ADD_MATERIAL);
 
   const { data, error } = await supabase
     .from("materials")
@@ -111,13 +112,15 @@ async function createMaterial(userId, businessId, details) {
   if (error) {
     throw new Error(error.message);
   }
+
+  recordLog(businessId, userId, "ADD_MATERIAL", `Added material "${data.name}"`);
   return buildMaterialResponse(data, []);
 }
 
 // Updates a material's editable fields (name/type/unit). Never touches stock.
 async function updateMaterial(userId, materialId, updates) {
   const material = await getMaterialOrThrow(materialId);
-  await assertMembership(userId, material.businessId);
+  await assertAction(userId, material.businessId, ACTIONS.UPDATE_MATERIAL);
 
   const { error } = await supabase
     .from("materials")
@@ -132,14 +135,17 @@ async function updateMaterial(userId, materialId, updates) {
     throw new Error(error.message);
   }
 
+  const merged = { ...material, ...updates };
+  recordLog(material.businessId, userId, "EDIT_MATERIAL", `Edited material "${merged.name}"`);
+
   const stocks = await getStocksForMaterials([materialId]);
-  return buildMaterialResponse({ ...material, ...updates }, stocks);
+  return buildMaterialResponse(merged, stocks);
 }
 
 // Soft-deletes a material by stamping deletedAt.
 async function deleteMaterial(userId, materialId) {
   const material = await getMaterialOrThrow(materialId);
-  await assertMembership(userId, material.businessId);
+  await assertAction(userId, material.businessId, ACTIONS.DELETE_MATERIAL);
 
   const { error } = await supabase
     .from("materials")
@@ -149,12 +155,14 @@ async function deleteMaterial(userId, materialId) {
   if (error) {
     throw new Error(error.message);
   }
+
+  recordLog(material.businessId, userId, "DELETE_MATERIAL", `Deleted material "${material.name}"`);
 }
 
 // Adds a new stock entry for a material and returns the updated material.
 async function addStock(userId, materialId, details) {
   const material = await getMaterialOrThrow(materialId);
-  await assertMembership(userId, material.businessId);
+  await assertAction(userId, material.businessId, ACTIONS.ADD_STOCKS);
 
   const { error } = await supabase.from("stocks").insert({
     materialId,
@@ -167,6 +175,13 @@ async function addStock(userId, materialId, details) {
   if (error) {
     throw new Error(error.message);
   }
+
+  recordLog(
+    material.businessId,
+    userId,
+    "ADD_STOCKS",
+    `Added ${details.quantity} stock to "${material.name}"`
+  );
 
   const stocks = await getStocksForMaterials([materialId]);
   return buildMaterialResponse(material, stocks);

@@ -1,5 +1,7 @@
 const { supabase } = require("../lib/supabaseClient");
+const { httpError } = require("../lib/httpError");
 const { assertMembership } = require("./membership.service");
+const materialService = require("./material.service");
 
 const VALID_STATUSES = ["AVAILABLE", "CONSUMED"];
 
@@ -72,4 +74,99 @@ async function listStocks(userId, businessId, filters) {
   };
 }
 
-module.exports = { VALID_STATUSES, listStocks };
+// Loads a stock batch by id (soft-deleted batches still count so their history
+// stays viewable). Throws 404 if it doesn't exist or belongs to another business.
+async function getStockForBusinessOrThrow(stockId, businessId) {
+  const { data, error } = await supabase
+    .from("stocks")
+    .select("id, businessId, materialId")
+    .eq("id", stockId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!data || data.businessId !== businessId) {
+    throw httpError(404, "Stock not found");
+  }
+  return data;
+}
+
+// Builds a Map of userId -> fullname for the given actor ids.
+async function getUserNamesByIds(userIds) {
+  const ids = [...new Set(userIds.filter(Boolean))];
+  if (ids.length === 0) return new Map();
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("userId, fullname")
+    .in("userId", ids);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  return new Map((data || []).map((u) => [u.userId, u.fullname]));
+}
+
+// Shapes a consumption-history row for the API. status is an array: the sale's
+// actual status, plus "DELETED" when the underlying sale was soft-deleted.
+function buildHistoryResponse(row, materialName, userNames) {
+  const sale = row.sales || {};
+  const status = [];
+  if (sale.status) status.push(sale.status);
+  if (sale.deletedAt) status.push("DELETED");
+
+  return {
+    id: row.id,
+    material_name: materialName || null,
+    created_by_name: sale.actorId ? userNames.get(sale.actorId) || null : null,
+    deducted: row.quantity_deducted,
+    remaining: row.remaining_stock,
+    status,
+    created_at: row.created_at,
+  };
+}
+
+// Lists a single stock batch's consumption events, newest first, paginated.
+// Includes deleted-sale events (flagged "DELETED"). Tie-breaks on id so the
+// frontend's infinite scroll never duplicates or skips rows across pages.
+async function getStockHistory(userId, businessId, stockId, filters) {
+  await assertMembership(userId, businessId);
+  const stock = await getStockForBusinessOrThrow(stockId, businessId);
+
+  const { page, limit } = filters;
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+
+  const { data, error, count } = await supabase
+    .from("stock_consumption_history")
+    .select(
+      "id, quantity_deducted, remaining_stock, created_at, sales!inner(status, deletedAt, actorId)",
+      { count: "exact" }
+    )
+    .eq("stockId", stockId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .range(from, to);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const rows = data || [];
+  const total = count || 0;
+
+  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialName = materialNames.get(stock.materialId);
+  const userNames = await getUserNamesByIds(rows.map((r) => (r.sales ? r.sales.actorId : null)));
+
+  return {
+    history: rows.map((r) => buildHistoryResponse(r, materialName, userNames)),
+    page,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+  };
+}
+
+module.exports = { VALID_STATUSES, listStocks, getStockHistory };

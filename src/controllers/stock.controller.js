@@ -49,4 +49,22 @@ async function listStocks(req, res) {
   }
 }
 
-module.exports = { listStocks };
+// GET /api/businesses/:businessId/stocks/:stockId/history — paginated consumption ledger.
+async function getStockHistory(req, res) {
+  try {
+    const result = await stockService.getStockHistory(
+      req.user.id,
+      req.params.businessId,
+      req.params.stockId,
+      {
+        page: parsePositiveInt(req.query.page, 1),
+        limit: parsePositiveInt(req.query.limit, 20),
+      }
+    );
+    return res.status(200).json(result);
+  } catch (err) {
+    return sendError(res, err, "getStockHistory");
+  }
+}
+
+module.exports = { listStocks, getStockHistory };

@@ -7,6 +7,9 @@ const materialRoutes = require("./src/routes/material.routes");
 const salesRoutes = require("./src/routes/sales.routes");
 const stockRoutes = require("./src/routes/stock.routes");
 const memberRoutes = require("./src/routes/member.routes");
+const auditRoutes = require("./src/routes/audit.routes");
+const expenseRoutes = require("./src/routes/expense.routes");
+const inventoryRoutes = require("./src/routes/inventory.routes");
 
 const app = express();
 app.use(express.json());
@@ -18,6 +21,9 @@ app.use("/api", materialRoutes);
 app.use("/api", salesRoutes);
 app.use("/api", stockRoutes);
 app.use("/api", memberRoutes);
+app.use("/api", auditRoutes);
+app.use("/api", expenseRoutes);
+app.use("/api", inventoryRoutes);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

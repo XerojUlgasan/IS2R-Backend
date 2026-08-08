@@ -1,6 +1,6 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership } = require("./membership.service");
+const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
 const materialService = require("./material.service");
 
 const VALID_STATUSES = ["PENDING", "PAID"];
@@ -109,7 +109,7 @@ function mapRpcError(error) {
 
 // Records a sale atomically via the create_sale RPC (locks stock, consumes FIFO, inserts).
 async function createSale(userId, businessId, details) {
-  await assertMembership(userId, businessId);
+  await assertAction(userId, businessId, ACTIONS.CREATE_SALES);
 
   const { data, error } = await supabase.rpc("create_sale", {
     p_business_id: businessId,
@@ -132,7 +132,7 @@ async function createSale(userId, businessId, details) {
 // Updates a sale's editable fields (status/remarks). Never touches stock.
 async function updateSale(userId, saleId, updates) {
   const sale = await getSaleOrThrow(saleId);
-  await assertMembership(userId, sale.businessId);
+  await assertAction(userId, sale.businessId, ACTIONS.UPDATE_SALES);
 
   const { error } = await supabase.from("sales").update(updates).eq("id", saleId);
   if (error) {
@@ -146,7 +146,7 @@ async function updateSale(userId, saleId, updates) {
 // Soft-deletes a sale and restores its stock atomically via the delete_sale RPC.
 async function deleteSale(userId, saleId) {
   const sale = await getSaleOrThrow(saleId);
-  await assertMembership(userId, sale.businessId);
+  await assertAction(userId, sale.businessId, ACTIONS.DELETE_SALES);
 
   const { error } = await supabase.rpc("delete_sale", { p_sale_id: saleId });
   if (error) {

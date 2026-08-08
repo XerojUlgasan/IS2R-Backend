@@ -10,4 +10,10 @@ router.use(requireAuth);
 // Business-scoped, read-only stock history.
 router.get("/businesses/:businessId/stocks", stockController.listStocks);
 
+// Per-batch consumption ledger for the History modal.
+router.get(
+  "/businesses/:businessId/stocks/:stockId/history",
+  stockController.getStockHistory
+);
+
 module.exports = router;
