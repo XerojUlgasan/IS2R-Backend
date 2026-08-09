@@ -120,4 +120,22 @@ async function deleteSale(req, res) {
   }
 }
 
-module.exports = { listSales, createSale, updateSale, deleteSale };
+// GET /api/businesses/:businessId/sales-report?period=<...> — analytics.
+async function getSalesReport(req, res) {
+  const period = req.query.period === undefined ? "daily" : req.query.period;
+
+  if (!salesService.VALID_PERIODS.includes(period)) {
+    return res.status(400).json({
+      error: `period must be one of ${salesService.VALID_PERIODS.join(", ")}`,
+    });
+  }
+
+  try {
+    const report = await salesService.getSalesReport(req.user.id, req.params.businessId, period);
+    return res.status(200).json({ report });
+  } catch (err) {
+    return sendError(res, err, "getSalesReport");
+  }
+}
+
+module.exports = { listSales, createSale, updateSale, deleteSale, getSalesReport };

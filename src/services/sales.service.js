@@ -154,10 +154,224 @@ async function deleteSale(userId, saleId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Sales Reports (analytics)
+// ---------------------------------------------------------------------------
+
+const VALID_PERIODS = ["daily", "weekly", "monthly", "yearly"];
+
+// Cap on the "Top Performing Materials" table.
+const TOP_SEGMENTS_LIMIT = 10;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const REPORT_MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+// Midnight UTC of the given timestamp.
+function startOfUTCDay(ms) {
+  const d = new Date(ms);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+// Builds the contiguous timeline buckets, oldest → newest. Spans mirror the
+// inventory report so the two analytics pages stay consistent. Each bucket is
+// { label, start, end } with [start, end) millisecond bounds.
+function buildBuckets(period, now) {
+  const buckets = [];
+
+  if (period === "daily") {
+    // Last 7 days, one bucket per day.
+    for (let i = 6; i >= 0; i--) {
+      const start = startOfUTCDay(now - i * DAY_MS);
+      buckets.push({ label: WEEKDAYS[new Date(start).getUTCDay()], start, end: start + DAY_MS });
+    }
+  } else if (period === "monthly") {
+    // Last 12 calendar months.
+    const y = new Date(now).getUTCFullYear();
+    const m = new Date(now).getUTCMonth();
+    for (let i = 11; i >= 0; i--) {
+      const start = Date.UTC(y, m - i, 1);
+      const end = Date.UTC(y, m - i + 1, 1);
+      buckets.push({ label: REPORT_MONTHS[new Date(start).getUTCMonth()], start, end });
+    }
+  } else if (period === "yearly") {
+    // Last 5 calendar years.
+    const y = new Date(now).getUTCFullYear();
+    for (let i = 4; i >= 0; i--) {
+      buckets.push({ label: String(y - i), start: Date.UTC(y - i, 0, 1), end: Date.UTC(y - i + 1, 0, 1) });
+    }
+  } else {
+    // weekly (default): last 8 rolling 7-day windows.
+    const endOfToday = startOfUTCDay(now) + DAY_MS;
+    for (let i = 7; i >= 0; i--) {
+      const end = endOfToday - i * 7 * DAY_MS;
+      buckets.push({ label: `W${8 - i}`, start: end - 7 * DAY_MS, end });
+    }
+  }
+
+  return buckets;
+}
+
+// Signed % change, one decimal. Returns undefined when there's no prior base
+// to compare against (so the caller can omit the field).
+function pctChange(current, previous) {
+  if (!(previous > 0)) return undefined;
+  return Math.round(((current - previous) / previous) * 1000) / 10;
+}
+
+// Fetches everything the report needs: non-deleted sales from the previous
+// window onward (covers current + previous for trends), and the current-window
+// consumption rows joined to their batch mfg_price for COGS.
+async function fetchReportData(businessId, prevStart, currentStart) {
+  const [salesRes, consumptionRes] = await Promise.all([
+    supabase
+      .from("sales")
+      .select("materialId, qty_used, total_amount, created_at")
+      .eq("businessId", businessId)
+      .is("deletedAt", null)
+      .gte("created_at", new Date(prevStart).toISOString()),
+    supabase
+      .from("stock_consumption_history")
+      .select("quantity_deducted, sales!inner(businessId, created_at, deletedAt), stocks!inner(mfg_price)")
+      .eq("sales.businessId", businessId)
+      .is("sales.deletedAt", null)
+      .gte("sales.created_at", new Date(currentStart).toISOString()),
+  ]);
+
+  if (salesRes.error) throw new Error(salesRes.error.message);
+  if (consumptionRes.error) throw new Error(consumptionRes.error.message);
+
+  return {
+    sales: salesRes.data || [],
+    consumption: consumptionRes.data || [],
+  };
+}
+
+// Computes the report object from raw rows. Pure/synchronous for testability.
+// Names are looked up by the caller and passed in as a materialId -> name Map.
+function computeReport({ sales, consumption }, period, now, materialNames) {
+  const buckets = buildBuckets(period, now);
+  const currentStart = buckets[0].start;
+  const currentEnd = buckets[buckets.length - 1].end;
+  const span = currentEnd - currentStart;
+  const prevStart = currentStart - span;
+
+  const inBucket = (ms) => buckets.findIndex((b) => ms >= b.start && ms < b.end);
+
+  const timeline = buckets.map((b) => ({ label: b.label, revenue: 0 }));
+
+  let totalRevenue = 0;
+  let prevRevenue = 0;
+  let currentSaleCount = 0;
+
+  // Per-material accumulators for the current and previous windows.
+  const curByMaterial = new Map(); // id -> { volume, revenue }
+  const prevRevByMaterial = new Map(); // id -> revenue
+
+  for (const sale of sales) {
+    const ms = new Date(sale.created_at).getTime();
+    const amount = sale.total_amount || 0;
+    const qty = sale.qty_used || 0;
+
+    if (ms >= currentStart && ms < currentEnd) {
+      totalRevenue += amount;
+      currentSaleCount += 1;
+
+      const idx = inBucket(ms);
+      if (idx !== -1) timeline[idx].revenue += amount;
+
+      const agg = curByMaterial.get(sale.materialId) || { volume: 0, revenue: 0 };
+      agg.volume += qty;
+      agg.revenue += amount;
+      curByMaterial.set(sale.materialId, agg);
+    } else if (ms >= prevStart && ms < currentStart) {
+      prevRevenue += amount;
+      prevRevByMaterial.set(
+        sale.materialId,
+        (prevRevByMaterial.get(sale.materialId) || 0) + amount
+      );
+    }
+  }
+
+  // COGS over the current window = Σ (units drawn from a batch × its mfg_price).
+  let cogs = 0;
+  for (const row of consumption) {
+    const price = row.stocks ? row.stocks.mfg_price || 0 : 0;
+    cogs += (row.quantity_deducted || 0) * price;
+  }
+  const estimatedProfit = totalRevenue - cogs;
+
+  // --- KPIs (optional fields omitted rather than sent null). ---
+  const kpis = { totalRevenue: Math.round(totalRevenue) };
+  const revenueTrendPct = pctChange(totalRevenue, prevRevenue);
+  if (revenueTrendPct !== undefined) kpis.revenueTrendPct = revenueTrendPct;
+  kpis.estimatedProfit = Math.round(estimatedProfit);
+  if (totalRevenue > 0) {
+    kpis.profitMarginPct = Math.round((estimatedProfit / totalRevenue) * 1000) / 10;
+  }
+
+  // --- Segments: top materials by current-window revenue. ---
+  const segments = [...curByMaterial.entries()]
+    .map(([id, agg]) => {
+      const seg = {
+        id,
+        name: materialNames.get(id) || null,
+        volume: Math.round(agg.volume),
+        revenue: Math.round(agg.revenue),
+      };
+      const growthPct = pctChange(agg.revenue, prevRevByMaterial.get(id) || 0);
+      if (growthPct !== undefined) seg.growthPct = growthPct;
+      return seg;
+    })
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, TOP_SEGMENTS_LIMIT);
+
+  // No sales in the window → empty timeline + segments per the frontend contract.
+  return {
+    kpis,
+    timeline: currentSaleCount > 0 ? timeline : [],
+    segments,
+  };
+}
+
+// Builds the sales report for a business over the given period.
+async function getSalesReport(userId, businessId, period) {
+  await assertMembership(userId, businessId);
+
+  const now = Date.now();
+  const buckets = buildBuckets(period, now);
+  const currentStart = buckets[0].start;
+  const currentEnd = buckets[buckets.length - 1].end;
+  const prevStart = currentStart - (currentEnd - currentStart);
+
+  const data = await fetchReportData(businessId, prevStart, currentStart);
+
+  // Resolve names for every material that appears in the current window.
+  const currentMaterialIds = [
+    ...new Set(
+      data.sales
+        .filter((s) => {
+          const ms = new Date(s.created_at).getTime();
+          return ms >= currentStart && ms < currentEnd;
+        })
+        .map((s) => s.materialId)
+    ),
+  ];
+  const materialNames = await materialService.getMaterialNamesByIds(currentMaterialIds);
+
+  return computeReport(data, period, now, materialNames);
+}
+
 module.exports = {
   VALID_STATUSES,
+  VALID_PERIODS,
   listSales,
   createSale,
   updateSale,
   deleteSale,
+  getSalesReport,
+  computeReport,
 };

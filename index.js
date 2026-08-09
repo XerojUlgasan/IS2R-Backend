@@ -10,6 +10,7 @@ const memberRoutes = require("./src/routes/member.routes");
 const auditRoutes = require("./src/routes/audit.routes");
 const expenseRoutes = require("./src/routes/expense.routes");
 const inventoryRoutes = require("./src/routes/inventory.routes");
+const dashboardRoutes = require("./src/routes/dashboard.routes");
 
 const app = express();
 app.use(express.json());
@@ -24,6 +25,7 @@ app.use("/api", memberRoutes);
 app.use("/api", auditRoutes);
 app.use("/api", expenseRoutes);
 app.use("/api", inventoryRoutes);
+app.use("/api", dashboardRoutes);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
