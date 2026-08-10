@@ -11,6 +11,7 @@ const auditRoutes = require("./src/routes/audit.routes");
 const expenseRoutes = require("./src/routes/expense.routes");
 const inventoryRoutes = require("./src/routes/inventory.routes");
 const dashboardRoutes = require("./src/routes/dashboard.routes");
+const calendarRoutes = require("./src/routes/calendar.routes");
 
 const app = express();
 app.use(express.json());
@@ -26,6 +27,7 @@ app.use("/api", auditRoutes);
 app.use("/api", expenseRoutes);
 app.use("/api", inventoryRoutes);
 app.use("/api", dashboardRoutes);
+app.use("/api", calendarRoutes);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
