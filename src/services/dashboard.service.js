@@ -8,9 +8,6 @@ const materialService = require("./material.service");
 const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// The period-revenue card toggle.
-const VALID_PERIODS = ["weekly", "monthly"];
-
 // Same reorder tiering as the inventory report so the two pages agree.
 const REORDER_LEVEL = 100;
 const STATUS_RANK = { OUT: 0, CRITICAL: 1, LOW: 2 };
@@ -37,11 +34,6 @@ function startOfManilaWeek(nowMs) {
 function startOfManilaMonth(nowMs) {
   const shifted = new Date(nowMs + MANILA_OFFSET_MS);
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - MANILA_OFFSET_MS;
-}
-
-// Start (UTC instant) of the selected period window.
-function periodStartOf(period, nowMs) {
-  return period === "weekly" ? startOfManilaWeek(nowMs) : startOfManilaMonth(nowMs);
 }
 
 // Signed whole-percent change; undefined when there's no prior base to compare.
@@ -83,12 +75,12 @@ async function getUserNamesByIds(userIds) {
   return new Map((data || []).map((u) => [u.userId, u.fullname]));
 }
 
-// Revenue KPIs (today + selected period) plus today's trend vs the same window
+// Revenue KPIs (today + both periods) plus today's trend vs the same window
 // yesterday. Fetches one bounded slice of sales and buckets it in memory.
-async function computeRevenue(businessId, now, periodStart) {
+async function computeRevenue(businessId, now, weekStart, monthStart) {
   const startToday = startOfManilaDay(now);
   const startYesterday = startToday - DAY_MS;
-  const fetchFrom = Math.min(startYesterday, periodStart);
+  const fetchFrom = Math.min(startYesterday, weekStart, monthStart);
 
   const { data, error } = await supabase
     .from("sales")
@@ -103,7 +95,8 @@ async function computeRevenue(businessId, now, periodStart) {
 
   let today = 0;
   let yesterday = 0;
-  let period = 0;
+  let weekly = 0;
+  let monthly = 0;
 
   for (const sale of data || []) {
     const ms = new Date(sale.created_at).getTime();
@@ -112,27 +105,42 @@ async function computeRevenue(businessId, now, periodStart) {
     if (ms >= startToday && ms <= now) today += amount;
     // Same slice of yesterday: [yesterday midnight, now - 24h).
     if (ms >= startYesterday && ms < now - DAY_MS) yesterday += amount;
-    if (ms >= periodStart && ms <= now) period += amount;
+    if (ms >= weekStart && ms <= now) weekly += amount;
+    if (ms >= monthStart && ms <= now) monthly += amount;
   }
 
-  return { today: round2(today), yesterday, period: round2(period) };
+  return {
+    today: round2(today),
+    yesterday,
+    weekly: round2(weekly),
+    monthly: round2(monthly),
+  };
 }
 
-// Sum of the selected period's expenses (same window as period revenue).
-async function computePeriodExpenses(businessId, periodStart) {
+// Expense totals for both period windows (same windows as period revenue).
+async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
+  const fetchFrom = Math.min(weekStart, monthStart);
+
   const { data, error } = await supabase
     .from("expenses")
     .select("amount, created_at")
     .eq("businessId", businessId)
-    .gte("created_at", new Date(periodStart).toISOString());
+    .gte("created_at", new Date(fetchFrom).toISOString());
 
   if (error) {
     throw new Error(error.message);
   }
 
-  let total = 0;
-  for (const e of data || []) total += e.amount || 0;
-  return round2(total);
+  let weekly = 0;
+  let monthly = 0;
+  for (const e of data || []) {
+    const ms = new Date(e.created_at).getTime();
+    const amount = e.amount || 0;
+    if (ms >= weekStart && ms <= now) weekly += amount;
+    if (ms >= monthStart && ms <= now) monthly += amount;
+  }
+
+  return { weekly: round2(weekly), monthly: round2(monthly) };
 }
 
 // Inventory valuation, fully-consumed count, and the low-stock preview.
@@ -164,7 +172,11 @@ async function computeInventory(businessId, now) {
       stock.materialId,
       (remainingByMaterial.get(stock.materialId) || 0) + remaining
     );
-    if (remaining > 0) inventoryValue += remaining * stock.mfg_price;
+    // mfg_price is the price for the batch's full quantity, so prorate it to
+    // the remaining units rather than treating it as a per-unit price.
+    if (remaining > 0 && stock.quantity > 0) {
+      inventoryValue += stock.mfg_price * (remaining / stock.quantity);
+    }
   }
 
   let fullyConsumedCount = 0;
@@ -258,17 +270,20 @@ async function isBusinessOwner(userId, businessId) {
   return Boolean(data) && data.ownerId === userId;
 }
 
-// Builds the full dashboard summary for a business over the selected period.
-async function getDashboard(userId, businessId, period) {
+// Builds the full dashboard summary for a business. Both the weekly and
+// monthly period figures are always returned so the client can toggle between
+// them without another request.
+async function getDashboard(userId, businessId) {
   await assertMembership(userId, businessId);
 
   const now = Date.now();
-  const periodStart = periodStartOf(period, now);
+  const weekStart = startOfManilaWeek(now);
+  const monthStart = startOfManilaMonth(now);
   const owner = await isBusinessOwner(userId, businessId);
 
-  const [revenue, periodExpenses, inventory, activity, recentSales] = await Promise.all([
-    computeRevenue(businessId, now, periodStart),
-    computePeriodExpenses(businessId, periodStart),
+  const [revenue, expenses, inventory, activity, recentSales] = await Promise.all([
+    computeRevenue(businessId, now, weekStart, monthStart),
+    computePeriodExpenses(businessId, now, weekStart, monthStart),
     computeInventory(businessId, now),
     computeActivity(businessId, owner),
     computeRecentSales(businessId),
@@ -276,9 +291,18 @@ async function getDashboard(userId, businessId, period) {
 
   const summary = {
     todaysRevenue: revenue.today,
-    periodRevenue: revenue.period,
-    periodExpenses,
-    periodNet: round2(revenue.period - periodExpenses),
+    periods: {
+      weekly: {
+        revenue: revenue.weekly,
+        expenses: expenses.weekly,
+        net: round2(revenue.weekly - expenses.weekly),
+      },
+      monthly: {
+        revenue: revenue.monthly,
+        expenses: expenses.monthly,
+        net: round2(revenue.monthly - expenses.monthly),
+      },
+    },
     inventoryValue: inventory.inventoryValue,
     fullyConsumedCount: inventory.fullyConsumedCount,
     lowStock: inventory.lowStock,
@@ -292,4 +316,4 @@ async function getDashboard(userId, businessId, period) {
   return summary;
 }
 
-module.exports = { VALID_PERIODS, getDashboard };
+module.exports = { getDashboard };

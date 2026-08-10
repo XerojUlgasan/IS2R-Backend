@@ -9,18 +9,12 @@ function sendError(res, err, label) {
   return res.status(500).json({ error: "Something went wrong" });
 }
 
-// GET /api/businesses/:businessId/dashboard?period=<weekly|monthly> — overview.
+// GET /api/businesses/:businessId/dashboard — overview.
+// The legacy `period` query param is ignored; both weekly and monthly figures
+// are always returned under summary.periods.
 async function getDashboard(req, res) {
-  const period = req.query.period === undefined ? "monthly" : req.query.period;
-
-  if (!dashboardService.VALID_PERIODS.includes(period)) {
-    return res.status(400).json({
-      error: `period must be one of ${dashboardService.VALID_PERIODS.join(", ")}`,
-    });
-  }
-
   try {
-    const summary = await dashboardService.getDashboard(req.user.id, req.params.businessId, period);
+    const summary = await dashboardService.getDashboard(req.user.id, req.params.businessId);
     return res.status(200).json({ summary });
   } catch (err) {
     return sendError(res, err, "getDashboard");

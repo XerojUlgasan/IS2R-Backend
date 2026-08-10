@@ -165,7 +165,11 @@ function computeReport({ materials, stocks, sales }, period, now) {
 
     if (remaining > 0) {
       availableBatches += 1;
-      inventoryValue += remaining * stock.mfg_price;
+      // mfg_price is the price for the batch's full quantity, so prorate it
+      // to the remaining units instead of treating it as a per-unit price.
+      const remainingValue =
+        stock.quantity > 0 ? stock.mfg_price * (remaining / stock.quantity) : 0;
+      inventoryValue += remainingValue;
 
       const ageDays = Math.floor((now - createdMs) / DAY_MS);
       if (ageDays >= AGING_MIN_DAYS) {
@@ -175,7 +179,7 @@ function computeReport({ materials, stocks, sales }, period, now) {
           name: material ? material.name : null,
           ageDays,
           remaining,
-          tiedUp: Math.round(remaining * stock.mfg_price),
+          tiedUp: Math.round(remainingValue),
           _createdMs: createdMs,
         });
       }
