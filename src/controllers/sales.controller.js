@@ -83,7 +83,7 @@ async function createSale(req, res) {
   }
 }
 
-// PATCH /api/sales/:saleId — update status and/or remarks.
+// PATCH /api/businesses/:businessId/sales/:saleId — update status and/or remarks.
 async function updateSale(req, res) {
   const { status, remarks } = req.body || {};
 
@@ -103,17 +103,22 @@ async function updateSale(req, res) {
   }
 
   try {
-    const sale = await salesService.updateSale(req.user.id, req.params.saleId, updates);
+    const sale = await salesService.updateSale(
+      req.user.id,
+      req.params.businessId,
+      req.params.saleId,
+      updates,
+    );
     return res.status(200).json({ sale });
   } catch (err) {
     return sendError(res, err, "updateSale");
   }
 }
 
-// DELETE /api/sales/:saleId — soft-delete a sale and restore its stock.
+// DELETE /api/businesses/:businessId/sales/:saleId — soft-delete a sale and restore its stock.
 async function deleteSale(req, res) {
   try {
-    await salesService.deleteSale(req.user.id, req.params.saleId);
+    await salesService.deleteSale(req.user.id, req.params.businessId, req.params.saleId);
     return res.status(204).send();
   } catch (err) {
     return sendError(res, err, "deleteSale");

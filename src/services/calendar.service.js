@@ -82,6 +82,7 @@ async function getMonthOverview(businessId, dateStr) {
     .from("sales")
     .select("total_amount, created_at")
     .eq("businessId", businessId)
+    .eq("status", "PAID")
     .is("deletedAt", null)
     .gte("created_at", fetchStart)
     .lt("created_at", fetchEnd);
@@ -129,6 +130,7 @@ async function getYearOverview(businessId, dateStr) {
     .from("sales")
     .select("total_amount, created_at")
     .eq("businessId", businessId)
+    .eq("status", "PAID")
     .is("deletedAt", null)
     .gte("created_at", fetchStart)
     .lt("created_at", fetchEnd);
@@ -185,10 +187,10 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
   // Run all queries in parallel.
   const [salesRes, deletedSalesRes, stocksRes, deletedStocksRes, consumptionRes, materialsRes] =
     await Promise.all([
-      // Non-deleted sales in period
+      // Non-deleted sales in period (only PAID count toward salesAmount)
       supabase
         .from("sales")
-        .select("id, materialId, total_amount, created_at")
+        .select("id, materialId, qty_used, total_amount, status, created_at")
         .eq("businessId", businessId)
         .is("deletedAt", null)
         .gte("created_at", periodStart)
@@ -272,13 +274,15 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
   const materialMap = new Map(materials.map((m) => [m.id, m]));
 
   // Per-material accumulators.
-  const acc = new Map(); // materialId -> { salesCount, salesAmount, stockAdded, consumed, deletedSales, deletedStocks }
+  const acc = new Map(); // materialId -> { salesCount, salesAmount, scrapCount, abandonedCount, stockAdded, consumed, deletedSales, deletedStocks }
 
   function getAcc(materialId) {
     if (!acc.has(materialId)) {
       acc.set(materialId, {
         salesCount: 0,
         salesAmount: 0,
+        scrapQty: 0,
+        abandonedQty: 0,
         stockAdded: 0,
         consumed: 0,
         deletedSales: 0,
@@ -292,7 +296,14 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
   for (const sale of sales) {
     const a = getAcc(sale.materialId);
     a.salesCount += 1;
-    a.salesAmount += sale.total_amount || 0;
+    // Only PAID sales contribute to revenue amounts.
+    if (sale.status === "PAID") {
+      a.salesAmount += sale.total_amount || 0;
+    } else if (sale.status === "SCRAP") {
+      a.scrapQty += sale.qty_used || 0;
+    } else if (sale.status === "ABANDONED") {
+      a.abandonedQty += sale.qty_used || 0;
+    }
   }
 
   // Deleted sales
@@ -326,6 +337,8 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
   let totalSalesCount = 0;
   let totalStockAdded = 0;
   let totalConsumed = 0;
+  let totalScrapQty = 0;
+  let totalAbandonedQty = 0;
   let deletedSalesCount = 0;
   let deletedStocksCount = 0;
 
@@ -350,6 +363,8 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
       consumed: Math.round(a.consumed * 100) / 100,
       salesCount: a.salesCount,
       salesAmount: Math.round(a.salesAmount * 100) / 100,
+      scrapQty: Math.round(a.scrapQty * 100) / 100,
+      abandonedQty: Math.round(a.abandonedQty * 100) / 100,
       deletedSales: a.deletedSales,
       deletedStocks: a.deletedStocks,
     });
@@ -358,6 +373,8 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     totalSalesCount += a.salesCount;
     totalStockAdded += a.stockAdded;
     totalConsumed += a.consumed;
+    totalScrapQty += a.scrapQty;
+    totalAbandonedQty += a.abandonedQty;
     deletedSalesCount += a.deletedSales;
     deletedStocksCount += a.deletedStocks;
   }
@@ -370,6 +387,8 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     totalSalesCount,
     totalStockAdded: Math.round(totalStockAdded * 100) / 100,
     totalConsumed: Math.round(totalConsumed * 100) / 100,
+    totalScrapQty: Math.round(totalScrapQty * 100) / 100,
+    totalAbandonedQty: Math.round(totalAbandonedQty * 100) / 100,
     deletedSalesCount,
     deletedStocksCount,
     materials: materialsArr,

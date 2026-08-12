@@ -14,8 +14,8 @@ router.post("/businesses/:businessId/sales", salesController.createSale);
 // Business-scoped, read-only aggregated analytics.
 router.get("/businesses/:businessId/sales-report", salesController.getSalesReport);
 
-// Sale-scoped: authorization resolves the sale's business internally.
-router.patch("/sales/:saleId", salesController.updateSale);
-router.delete("/sales/:saleId", salesController.deleteSale);
+// Sale-scoped: require businessId in the URL and verify membership.
+router.patch("/businesses/:businessId/sales/:saleId", salesController.updateSale);
+router.delete("/businesses/:businessId/sales/:saleId", salesController.deleteSale);
 
 module.exports = router;

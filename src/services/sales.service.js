@@ -1,15 +1,28 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
+const {
+  assertMembership,
+  assertAction,
+  ACTIONS,
+} = require("./membership.service");
 const materialService = require("./material.service");
 
-const VALID_STATUSES = ["PENDING", "PAID"];
+const VALID_STATUSES = ["PENDING", "PAID", "SCRAP", "ABANDONED"];
 
 const SALE_COLUMNS =
   "id, materialId, businessId, qty_used, total_amount, status, remarks, actorId, created_at";
 
-// Shapes a sale row for the API. created_by_name is the raw actor uuid for now.
-function buildSaleResponse(sale, materialName) {
+async function getActorNamesByIds(actorIds) {
+  if (!actorIds.length) return new Map();
+  const { data, error } = await supabase
+    .from("users")
+    .select('"userId", fullname')
+    .in('"userId"', actorIds);
+  if (error) throw new Error(error.message);
+  return new Map((data || []).map((u) => [u.userId, u.fullname]));
+}
+
+function buildSaleResponse(sale, materialName, actorNames) {
   return {
     id: sale.id,
     materialId: sale.materialId,
@@ -18,7 +31,7 @@ function buildSaleResponse(sale, materialName) {
     total_amount: sale.total_amount,
     status: sale.status,
     remarks: sale.remarks,
-    created_by_name: sale.actorId || null,
+    created_by_name: actorNames?.get(sale.actorId) || null,
     created_at: sale.created_at,
   };
 }
@@ -60,7 +73,9 @@ async function listSales(userId, businessId, filters) {
   // their sales entirely, so the paginated count stays accurate.
   let query = supabase
     .from("sales")
-    .select(`${SALE_COLUMNS}, materials!inner(name, deletedAt)`, { count: "exact" })
+    .select(`${SALE_COLUMNS}, materials!inner(name, deletedAt)`, {
+      count: "exact",
+    })
     .eq("businessId", businessId)
     .is("deletedAt", null)
     .is("materials.deletedAt", null);
@@ -80,8 +95,13 @@ async function listSales(userId, businessId, filters) {
   const sales = data || [];
   const total = count || 0;
 
+  const actorIds = [...new Set(sales.map((s) => s.actorId).filter(Boolean))];
+  const actorNames = await getActorNamesByIds(actorIds);
+
   return {
-    sales: sales.map((s) => buildSaleResponse(s, s.materials ? s.materials.name : null)),
+    sales: sales.map((s) =>
+      buildSaleResponse(s, s.materials ? s.materials.name : null, actorNames),
+    ),
     page,
     limit,
     total,
@@ -125,28 +145,49 @@ async function createSale(userId, businessId, details) {
     throw mapRpcError(error);
   }
 
-  const names = await materialService.getMaterialNamesByIds([data.materialId]);
-  return buildSaleResponse(data, names.get(data.materialId));
+  const [names, actorNames] = await Promise.all([
+    materialService.getMaterialNamesByIds([data.materialId]),
+    getActorNamesByIds([userId]),
+  ]);
+  return buildSaleResponse(data, names.get(data.materialId), actorNames);
 }
 
 // Updates a sale's editable fields (status/remarks). Never touches stock.
-async function updateSale(userId, saleId, updates) {
+async function updateSale(userId, businessId, saleId, updates) {
   const sale = await getSaleOrThrow(saleId);
-  await assertAction(userId, sale.businessId, ACTIONS.UPDATE_SALES);
 
-  const { error } = await supabase.from("sales").update(updates).eq("id", saleId);
+  // Verify the sale belongs to the business specified in the URL.
+  if (sale.businessId !== businessId) {
+    throw httpError(404, "Sale not found");
+  }
+
+  await assertAction(userId, businessId, ACTIONS.UPDATE_SALES);
+
+  const { error } = await supabase
+    .from("sales")
+    .update(updates)
+    .eq("id", saleId);
   if (error) {
     throw new Error(error.message);
   }
 
-  const names = await materialService.getMaterialNamesByIds([sale.materialId]);
-  return buildSaleResponse({ ...sale, ...updates }, names.get(sale.materialId));
+  const [names, actorNames] = await Promise.all([
+    materialService.getMaterialNamesByIds([sale.materialId]),
+    getActorNamesByIds([sale.actorId]),
+  ]);
+  return buildSaleResponse({ ...sale, ...updates }, names.get(sale.materialId), actorNames);
 }
 
 // Soft-deletes a sale and restores its stock atomically via the delete_sale RPC.
-async function deleteSale(userId, saleId) {
+async function deleteSale(userId, businessId, saleId) {
   const sale = await getSaleOrThrow(saleId);
-  await assertAction(userId, sale.businessId, ACTIONS.DELETE_SALES);
+
+  // Verify the sale belongs to the business specified in the URL.
+  if (sale.businessId !== businessId) {
+    throw httpError(404, "Sale not found");
+  }
+
+  await assertAction(userId, businessId, ACTIONS.DELETE_SALES);
 
   const { error } = await supabase.rpc("delete_sale", { p_sale_id: saleId });
   if (error) {
@@ -166,7 +207,18 @@ const TOP_SEGMENTS_LIMIT = 10;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const REPORT_MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
 ];
 
 // Midnight UTC of the given timestamp.
@@ -186,7 +238,11 @@ function buildBuckets(period, now) {
     // Last 7 days, one bucket per day.
     for (let i = 6; i >= 0; i--) {
       const start = startOfUTCDay(now - i * DAY_MS);
-      buckets.push({ label: WEEKDAYS[new Date(start).getUTCDay()], start, end: start + DAY_MS });
+      buckets.push({
+        label: WEEKDAYS[new Date(start).getUTCDay()],
+        start,
+        end: start + DAY_MS,
+      });
     }
   } else if (period === "monthly") {
     // Last 12 calendar months.
@@ -195,13 +251,21 @@ function buildBuckets(period, now) {
     for (let i = 11; i >= 0; i--) {
       const start = Date.UTC(y, m - i, 1);
       const end = Date.UTC(y, m - i + 1, 1);
-      buckets.push({ label: REPORT_MONTHS[new Date(start).getUTCMonth()], start, end });
+      buckets.push({
+        label: REPORT_MONTHS[new Date(start).getUTCMonth()],
+        start,
+        end,
+      });
     }
   } else if (period === "yearly") {
     // Last 5 calendar years.
     const y = new Date(now).getUTCFullYear();
     for (let i = 4; i >= 0; i--) {
-      buckets.push({ label: String(y - i), start: Date.UTC(y - i, 0, 1), end: Date.UTC(y - i + 1, 0, 1) });
+      buckets.push({
+        label: String(y - i),
+        start: Date.UTC(y - i, 0, 1),
+        end: Date.UTC(y - i + 1, 0, 1),
+      });
     }
   } else {
     // weekly (default): last 8 rolling 7-day windows.
@@ -235,7 +299,9 @@ async function fetchReportData(businessId, prevStart, currentStart) {
       .gte("created_at", new Date(prevStart).toISOString()),
     supabase
       .from("stock_consumption_history")
-      .select("quantity_deducted, sales!inner(businessId, created_at, deletedAt), stocks!inner(mfg_price)")
+      .select(
+        "quantity_deducted, sales!inner(businessId, created_at, deletedAt), stocks!inner(mfg_price)",
+      )
       .eq("sales.businessId", businessId)
       .is("sales.deletedAt", null)
       .gte("sales.created_at", new Date(currentStart).toISOString()),
@@ -259,7 +325,8 @@ function computeReport({ sales, consumption }, period, now, materialNames) {
   const span = currentEnd - currentStart;
   const prevStart = currentStart - span;
 
-  const inBucket = (ms) => buckets.findIndex((b) => ms >= b.start && ms < b.end);
+  const inBucket = (ms) =>
+    buckets.findIndex((b) => ms >= b.start && ms < b.end);
 
   const timeline = buckets.map((b) => ({ label: b.label, revenue: 0 }));
 
@@ -283,7 +350,10 @@ function computeReport({ sales, consumption }, period, now, materialNames) {
       const idx = inBucket(ms);
       if (idx !== -1) timeline[idx].revenue += amount;
 
-      const agg = curByMaterial.get(sale.materialId) || { volume: 0, revenue: 0 };
+      const agg = curByMaterial.get(sale.materialId) || {
+        volume: 0,
+        revenue: 0,
+      };
       agg.volume += qty;
       agg.revenue += amount;
       curByMaterial.set(sale.materialId, agg);
@@ -291,7 +361,7 @@ function computeReport({ sales, consumption }, period, now, materialNames) {
       prevRevenue += amount;
       prevRevByMaterial.set(
         sale.materialId,
-        (prevRevByMaterial.get(sale.materialId) || 0) + amount
+        (prevRevByMaterial.get(sale.materialId) || 0) + amount,
       );
     }
   }
@@ -310,7 +380,8 @@ function computeReport({ sales, consumption }, period, now, materialNames) {
   if (revenueTrendPct !== undefined) kpis.revenueTrendPct = revenueTrendPct;
   kpis.estimatedProfit = Math.round(estimatedProfit);
   if (totalRevenue > 0) {
-    kpis.profitMarginPct = Math.round((estimatedProfit / totalRevenue) * 1000) / 10;
+    kpis.profitMarginPct =
+      Math.round((estimatedProfit / totalRevenue) * 1000) / 10;
   }
 
   // --- Segments: top materials by current-window revenue. ---
@@ -357,10 +428,11 @@ async function getSalesReport(userId, businessId, period) {
           const ms = new Date(s.created_at).getTime();
           return ms >= currentStart && ms < currentEnd;
         })
-        .map((s) => s.materialId)
+        .map((s) => s.materialId),
     ),
   ];
-  const materialNames = await materialService.getMaterialNamesByIds(currentMaterialIds);
+  const materialNames =
+    await materialService.getMaterialNamesByIds(currentMaterialIds);
 
   return computeReport(data, period, now, materialNames);
 }
