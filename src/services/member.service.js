@@ -251,6 +251,9 @@ async function updatePermissions(userId, businessId, memberId, permissions) {
   await assertOwner(userId, businessId);
   const member = await getMemberInBusinessOrThrow(businessId, memberId);
 
+  const previousActions = await getActionsForMember(memberId);
+  const previousPermissions = actionsToPermissions(previousActions);
+
   const { data: actions, error } = await supabase
     .from("member_actions")
     .update({ ...permissionsToColumns(permissions), updateAt: new Date().toISOString() })
@@ -266,7 +269,9 @@ async function updatePermissions(userId, businessId, memberId, permissions) {
     businessId,
     userId,
     "CONFIGURE_MEMBER",
-    `Updated permissions for ${member.email || member.userId}`
+    `Updated permissions for ${member.email || member.userId}`,
+    { memberId: member.id, email: member.email || member.userId, permissions: previousPermissions },
+    { memberId: member.id, email: member.email || member.userId, permissions }
   );
 
   const users = await getUsersByIds([member.userId]);
@@ -281,6 +286,9 @@ async function removeMember(userId, businessId, memberId) {
   if (normalizeRole(member.role) === "Owner") {
     throw httpError(400, "The business owner cannot be removed");
   }
+
+  const previousActions = await getActionsForMember(memberId);
+  const previousPermissions = actionsToPermissions(previousActions);
 
   // member_actions first: its FK to business_members has no cascade.
   const { error: actionsError } = await supabase
@@ -301,7 +309,14 @@ async function removeMember(userId, businessId, memberId) {
     throw new Error(memberError.message);
   }
 
-  recordLog(businessId, userId, "REMOVE_MEMBER", `Removed member ${member.email || member.userId}`);
+  recordLog(
+    businessId,
+    userId,
+    "REMOVE_MEMBER",
+    `Removed member ${member.email || member.userId}`,
+    { memberId: member.id, email: member.email || member.userId, role: normalizeRole(member.role), permissions: previousPermissions },
+    null
+  );
 }
 
 module.exports = {

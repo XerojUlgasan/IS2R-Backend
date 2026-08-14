@@ -16,7 +16,7 @@ const VALID_CATEGORIES = [
 ];
 
 const EXPENSE_COLUMNS =
-  "id, title, category, amount, remarks, created_by, businessId, created_at";
+  "id, title, category, amount, remarks, created_by, businessId, created_at, stock_id, stocks(quantity, mfg_price)";
 
 // Returns the ISO timestamp for midnight UTC of the day after the given YYYY-MM-DD.
 function startOfNextDay(dateStr) {
@@ -41,17 +41,28 @@ async function getUserNamesByIds(userIds) {
   return new Map((data || []).map((u) => [u.userId, u.fullname]));
 }
 
+// Resolves the effective amount for an expense. Stock-linked expenses derive
+// their cost from the stock's mfg_price × quantity; manual expenses use the
+// stored amount directly.
+function resolveAmount(expense) {
+  if (expense.stock_id && expense.stocks) {
+    return expense.stocks.mfg_price;
+  }
+  return expense.amount;
+}
+
 // Shapes an expense row for the API, resolving the actor's display name.
 function buildExpenseResponse(expense, createdByName) {
   return {
     id: expense.id,
     title: expense.title,
     category: expense.category,
-    amount: expense.amount,
+    amount: resolveAmount(expense),
     remarks: expense.remarks,
     created_by_name: createdByName || null,
     created_at: expense.created_at,
     businessId: expense.businessId,
+    stock_id: expense.stock_id || null,
   };
 }
 
@@ -152,7 +163,17 @@ async function updateExpense(userId, expenseId, updates) {
     throw new Error(error.message);
   }
 
-  recordLog(expense.businessId, userId, "UPDATE_EXPENSE", `Updated expense "${data.title}"`);
+  const changedFields = Object.keys(updates)
+    .map((k) => `${k}: "${updates[k]}"`)
+    .join(", ");
+  recordLog(
+    expense.businessId,
+    userId,
+    "UPDATE_EXPENSE",
+    `Updated expense "${data.title}" — changed ${changedFields}`,
+    { id: expense.id, title: expense.title, category: expense.category, amount: expense.amount, remarks: expense.remarks },
+    { id: data.id, title: data.title, category: data.category, amount: data.amount, remarks: data.remarks }
+  );
 
   const names = await getUserNamesByIds([data.created_by]);
   return buildExpenseResponse(data, names.get(data.created_by));
@@ -163,12 +184,25 @@ async function deleteExpense(userId, expenseId) {
   const expense = await getExpenseOrThrow(expenseId);
   await assertAction(userId, expense.businessId, ACTIONS.DELETE_EXPENSE);
 
+  // Deletion is only allowed within 24 hours of creation.
+  const ageMs = Date.now() - new Date(expense.created_at).getTime();
+  if (ageMs > 24 * 60 * 60 * 1000) {
+    throw httpError(403, "Expense can no longer be deleted after 24 hours");
+  }
+
   const { error } = await supabase.from("expenses").delete().eq("id", expenseId);
   if (error) {
     throw new Error(error.message);
   }
 
-  recordLog(expense.businessId, userId, "DELETE_EXPENSE", `Deleted expense "${expense.title}"`);
+  recordLog(
+    expense.businessId,
+    userId,
+    "DELETE_EXPENSE",
+    `Removed expense "${expense.title}" (category: ${expense.category}, amount: ₱${expense.amount})`,
+    { id: expense.id, title: expense.title, category: expense.category, amount: expense.amount, remarks: expense.remarks },
+    null
+  );
 }
 
 module.exports = {

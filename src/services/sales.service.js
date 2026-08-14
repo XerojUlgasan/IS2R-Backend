@@ -6,8 +6,9 @@ const {
   ACTIONS,
 } = require("./membership.service");
 const materialService = require("./material.service");
+const { recordLog } = require("./audit.service");
 
-const VALID_STATUSES = ["PENDING", "PAID", "SCRAP", "ABANDONED"];
+const VALID_STATUSES = ["PENDING", "PAID", "SCRAP", "ABANDONED", "REJECT"];
 
 const SALE_COLUMNS =
   "id, materialId, businessId, qty_used, total_amount, status, remarks, actorId, created_at";
@@ -77,6 +78,7 @@ async function listSales(userId, businessId, filters) {
       count: "exact",
     })
     .eq("businessId", businessId)
+    .in("status", ["PAID", "PENDING"])
     .is("deletedAt", null)
     .is("materials.deletedAt", null);
 
@@ -175,6 +177,20 @@ async function updateSale(userId, businessId, saleId, updates) {
     materialService.getMaterialNamesByIds([sale.materialId]),
     getActorNamesByIds([sale.actorId]),
   ]);
+
+  const materialName = names.get(sale.materialId) || sale.materialId;
+  const changedFields = Object.keys(updates)
+    .map((k) => `${k}: "${updates[k]}"`)
+    .join(", ");
+  recordLog(
+    businessId,
+    userId,
+    "UPDATE_SALE",
+    `Updated sale for "${materialName}" — changed ${changedFields}`,
+    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, status: sale.status, remarks: sale.remarks },
+    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, ...updates }
+  );
+
   return buildSaleResponse({ ...sale, ...updates }, names.get(sale.materialId), actorNames);
 }
 
@@ -187,12 +203,29 @@ async function deleteSale(userId, businessId, saleId) {
     throw httpError(404, "Sale not found");
   }
 
+  // Deletion is only allowed within 24 hours of creation.
+  const ageMs = Date.now() - new Date(sale.created_at).getTime();
+  if (ageMs > 24 * 60 * 60 * 1000) {
+    throw httpError(403, "Sale can no longer be deleted after 24 hours");
+  }
+
   await assertAction(userId, businessId, ACTIONS.DELETE_SALES);
 
   const { error } = await supabase.rpc("delete_sale", { p_sale_id: saleId });
   if (error) {
     throw mapRpcError(error);
   }
+
+  const names = await materialService.getMaterialNamesByIds([sale.materialId]);
+  const materialName = names.get(sale.materialId) || sale.materialId;
+  recordLog(
+    businessId,
+    userId,
+    "DELETE_SALE",
+    `Deleted sale for "${materialName}" (qty: ${sale.qty_used}, amount: ₱${sale.total_amount})`,
+    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, status: sale.status, remarks: sale.remarks },
+    null
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +328,7 @@ async function fetchReportData(businessId, prevStart, currentStart) {
       .from("sales")
       .select("materialId, qty_used, total_amount, created_at")
       .eq("businessId", businessId)
+      .eq("status", "PAID")
       .is("deletedAt", null)
       .gte("created_at", new Date(prevStart).toISOString()),
     supabase

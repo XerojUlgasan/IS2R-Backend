@@ -24,20 +24,17 @@ async function listMaterials(req, res) {
 
 // POST /api/businesses/:businessId/materials — create a material.
 async function createMaterial(req, res) {
-  const { name, type, unit } = req.body || {};
+  const { name } = req.body || {};
 
   if (typeof name !== "string" || name.trim() === "") {
     return res.status(400).json({ error: "name is required and must be a non-empty string" });
-  }
-  if (!materialService.VALID_TYPES.includes(type)) {
-    return res.status(400).json({ error: "type must be one of PCS or SIZE" });
   }
 
   try {
     const material = await materialService.createMaterial(
       req.user.id,
       req.params.businessId,
-      { name: name.trim(), type, unit }
+      { name: name.trim() }
     );
     return res.status(201).json({ material });
   } catch (err) {
@@ -47,21 +44,13 @@ async function createMaterial(req, res) {
 
 // PATCH /api/materials/:materialId — update editable fields.
 async function updateMaterial(req, res) {
-  const { name, type, unit } = req.body || {};
+  const { name } = req.body || {};
 
   if (name !== undefined && (typeof name !== "string" || name.trim() === "")) {
     return res.status(400).json({ error: "name must be a non-empty string" });
   }
-  if (type !== undefined && !materialService.VALID_TYPES.includes(type)) {
-    return res.status(400).json({ error: "type must be one of PCS or SIZE" });
-  }
 
-  const updates = {};
-  if (name !== undefined) updates.name = name.trim();
-  if (type !== undefined) updates.type = type;
-  if (unit !== undefined) updates.unit = unit;
-
-  if (Object.keys(updates).length === 0) {
+  if (name === undefined) {
     return res.status(400).json({ error: "No editable fields provided" });
   }
 
@@ -69,7 +58,7 @@ async function updateMaterial(req, res) {
     const material = await materialService.updateMaterial(
       req.user.id,
       req.params.materialId,
-      updates
+      { name: name.trim() }
     );
     return res.status(200).json({ material });
   } catch (err) {

@@ -16,4 +16,8 @@ router.get(
   stockController.getStockHistory
 );
 
+// Per-batch mutation — both disabled after 24 h.
+router.patch("/businesses/:businessId/stocks/:stockId", stockController.updateStock);
+router.delete("/businesses/:businessId/stocks/:stockId", stockController.deleteStock);
+
 module.exports = router;

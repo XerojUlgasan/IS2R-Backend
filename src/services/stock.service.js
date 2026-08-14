@@ -1,7 +1,8 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership } = require("./membership.service");
+const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
 const materialService = require("./material.service");
+const { recordLog } = require("./audit.service");
 
 const VALID_STATUSES = ["AVAILABLE", "CONSUMED"];
 
@@ -74,13 +75,14 @@ async function listStocks(userId, businessId, filters) {
   };
 }
 
-// Loads a stock batch by id (soft-deleted batches still count so their history
-// stays viewable). Throws 404 if it doesn't exist or belongs to another business.
+// Loads a stock batch by id including created_at for age checks.
+// Throws 404 if it doesn't exist or belongs to another business.
 async function getStockForBusinessOrThrow(stockId, businessId) {
   const { data, error } = await supabase
     .from("stocks")
-    .select("id, businessId, materialId")
+    .select("id, businessId, materialId, quantity, quantity_sold, mfg_price, status, created_at")
     .eq("id", stockId)
+    .is("deletedAt", null)
     .maybeSingle();
 
   if (error) {
@@ -90,6 +92,14 @@ async function getStockForBusinessOrThrow(stockId, businessId) {
     throw httpError(404, "Stock not found");
   }
   return data;
+}
+
+// Throws 403 if the stock batch was created more than 24 hours ago.
+function assertWithin24Hours(stock, action) {
+  const ageMs = Date.now() - new Date(stock.created_at).getTime();
+  if (ageMs > 24 * 60 * 60 * 1000) {
+    throw httpError(403, `Stock can no longer be ${action} after 24 hours`);
+  }
 }
 
 // Builds a Map of userId -> fullname for the given actor ids.
@@ -169,4 +179,77 @@ async function getStockHistory(userId, businessId, stockId, filters) {
   };
 }
 
-module.exports = { VALID_STATUSES, listStocks, getStockHistory };
+// Updates editable fields (quantity, mfg_price) on a stock batch.
+// Only allowed within 24 hours of creation and when no stock has been sold.
+async function updateStock(userId, businessId, stockId, updates) {
+  const stock = await getStockForBusinessOrThrow(stockId, businessId);
+  assertWithin24Hours(stock, "updated");
+
+  if ((stock.quantity_sold || 0) > 0) {
+    throw httpError(403, "Stock cannot be updated because it has already been used in a sale");
+  }
+
+  await assertAction(userId, businessId, ACTIONS.UPDATE_STOCKS);
+
+  const { data, error } = await supabase
+    .from("stocks")
+    .update(updates)
+    .eq("id", stockId)
+    .select(`${STOCK_COLUMNS}, materials(name)`)
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialName = materialNames.get(stock.materialId) || stock.materialId;
+  const changedFields = Object.keys(updates)
+    .map((k) => `${k}: "${updates[k]}"`)
+    .join(", ");
+  recordLog(
+    businessId,
+    userId,
+    "UPDATE_STOCK",
+    `Updated stock batch for "${materialName}" — changed ${changedFields}`,
+    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price },
+    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price, ...updates }
+  );
+
+  return buildStockResponse(data);
+}
+
+// Soft-deletes a stock batch by stamping deletedAt.
+// Only allowed within 24 hours of creation and when no stock has been sold.
+async function deleteStock(userId, businessId, stockId) {
+  const stock = await getStockForBusinessOrThrow(stockId, businessId);
+  assertWithin24Hours(stock, "deleted");
+
+  if ((stock.quantity_sold || 0) > 0) {
+    throw httpError(403, "Stock cannot be deleted because it has already been used in a sale");
+  }
+
+  await assertAction(userId, businessId, ACTIONS.DELETE_STOCKS);
+
+  const { error } = await supabase
+    .from("stocks")
+    .update({ deletedAt: new Date().toISOString() })
+    .eq("id", stockId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialName = materialNames.get(stock.materialId) || stock.materialId;
+  recordLog(
+    businessId,
+    userId,
+    "DELETE_STOCK",
+    `Deleted stock batch for "${materialName}" (qty: ${stock.quantity}, price: ₱${stock.mfg_price})`,
+    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price },
+    null
+  );
+}
+
+module.exports = { VALID_STATUSES, listStocks, getStockHistory, updateStock, deleteStock };

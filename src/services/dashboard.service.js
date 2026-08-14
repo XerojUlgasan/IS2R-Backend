@@ -86,6 +86,7 @@ async function computeRevenue(businessId, now, weekStart, monthStart) {
     .from("sales")
     .select("total_amount, created_at")
     .eq("businessId", businessId)
+    .eq("status", "PAID")
     .is("deletedAt", null)
     .gte("created_at", new Date(fetchFrom).toISOString());
 
@@ -123,7 +124,7 @@ async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
 
   const { data, error } = await supabase
     .from("expenses")
-    .select("amount, created_at")
+    .select("amount, created_at, stock_id, stocks(quantity, mfg_price)")
     .eq("businessId", businessId)
     .gte("created_at", new Date(fetchFrom).toISOString());
 
@@ -135,7 +136,10 @@ async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
   let monthly = 0;
   for (const e of data || []) {
     const ms = new Date(e.created_at).getTime();
-    const amount = e.amount || 0;
+    // Derive amount from stock for stock-linked expenses, otherwise use stored amount.
+    const amount = (e.stock_id && e.stocks)
+      ? e.stocks.mfg_price
+      : (e.amount || 0);
     if (ms >= weekStart && ms <= now) weekly += amount;
     if (ms >= monthStart && ms <= now) monthly += amount;
   }
@@ -148,7 +152,7 @@ async function computeInventory(businessId, now) {
   const [materialsRes, stocksRes] = await Promise.all([
     supabase
       .from("materials")
-      .select("id, name, unit, deletedAt")
+      .select("id, name, deletedAt")
       .eq("businessId", businessId)
       .is("deletedAt", null),
     supabase
@@ -187,7 +191,7 @@ async function computeInventory(businessId, now) {
 
     const status = lowStockStatus(remaining);
     if (status) {
-      lowStock.push({ id: material.id, name: material.name, unit: material.unit, remaining, _status: status });
+      lowStock.push({ id: material.id, name: material.name, remaining, _status: status });
     }
   }
 
@@ -230,6 +234,7 @@ async function computeRecentSales(businessId) {
     .from("sales")
     .select("id, materialId, qty_used, total_amount, status, remarks, actorId, created_at")
     .eq("businessId", businessId)
+    .eq("status", "PAID")
     .is("deletedAt", null)
     .order("created_at", { ascending: false })
     .limit(RECENT_SALES_LIMIT);

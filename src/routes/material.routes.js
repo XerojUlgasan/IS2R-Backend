@@ -14,7 +14,7 @@ router.post("/businesses/:businessId/materials", materialController.createMateri
 
 // Material-scoped: authorization resolves the material's business internally.
 router.patch("/materials/:materialId", materialController.updateMaterial);
-router.delete("/materials/:materialId", materialController.deleteMaterial);
+// router.delete("/materials/:materialId", materialController.deleteMaterial);
 router.post("/materials/:materialId/stock", materialController.addStock);
 
 module.exports = router;

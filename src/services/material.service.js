@@ -1,15 +1,17 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
+const {
+  assertMembership,
+  assertAction,
+  ACTIONS,
+} = require("./membership.service");
 const { recordLog } = require("./audit.service");
-
-const VALID_TYPES = ["PCS", "SIZE"];
 
 // Loads a non-deleted material by id; throws 404 if it doesn't exist.
 async function getMaterialOrThrow(materialId) {
   const { data, error } = await supabase
     .from("materials")
-    .select("id, name, type, unit, businessId, created_at")
+    .select("id, name, businessId, created_at")
     .eq("id", materialId)
     .is("deletedAt", null)
     .maybeSingle();
@@ -45,7 +47,7 @@ async function getStocksForMaterials(materialIds) {
 function buildMaterialResponse(material, stockRows) {
   const quantity = stockRows.reduce(
     (sum, row) => sum + (row.quantity - (row.quantity_sold || 0)),
-    0
+    0,
   );
 
   const latest = stockRows
@@ -55,8 +57,6 @@ function buildMaterialResponse(material, stockRows) {
   return {
     id: material.id,
     name: material.name,
-    type: material.type,
-    unit: material.unit,
     quantity,
     mfg_price: latest ? latest.mfg_price : null,
     status: quantity > 0 ? "AVAILABLE" : "CONSUMED",
@@ -70,7 +70,7 @@ async function listMaterials(userId, businessId) {
 
   const { data: materials, error } = await supabase
     .from("materials")
-    .select("id, name, type, unit, businessId, created_at")
+    .select("id, name, businessId, created_at")
     .eq("businessId", businessId)
     .is("deletedAt", null);
 
@@ -90,7 +90,7 @@ async function listMaterials(userId, businessId) {
   }
 
   return materials.map((material) =>
-    buildMaterialResponse(material, stocksByMaterial.get(material.id) || [])
+    buildMaterialResponse(material, stocksByMaterial.get(material.id) || []),
   );
 }
 
@@ -102,33 +102,32 @@ async function createMaterial(userId, businessId, details) {
     .from("materials")
     .insert({
       name: details.name,
-      type: details.type,
-      unit: details.unit || null,
       businessId,
     })
-    .select("id, name, type, unit, businessId, created_at")
+    .select("id, name, businessId, created_at")
     .single();
 
   if (error) {
     throw new Error(error.message);
   }
 
-  recordLog(businessId, userId, "ADD_MATERIAL", `Added material "${data.name}"`);
+  recordLog(
+    businessId,
+    userId,
+    "ADD_MATERIAL",
+    `Added material "${data.name}"`,
+  );
   return buildMaterialResponse(data, []);
 }
 
-// Updates a material's editable fields (name/type/unit). Never touches stock.
+// Updates a material's editable fields (name only). Never touches stock.
 async function updateMaterial(userId, materialId, updates) {
   const material = await getMaterialOrThrow(materialId);
   await assertAction(userId, material.businessId, ACTIONS.UPDATE_MATERIAL);
 
   const { error } = await supabase
     .from("materials")
-    .update({
-      name: updates.name,
-      type: updates.type,
-      unit: updates.unit,
-    })
+    .update({ name: updates.name })
     .eq("id", materialId);
 
   if (error) {
@@ -136,7 +135,14 @@ async function updateMaterial(userId, materialId, updates) {
   }
 
   const merged = { ...material, ...updates };
-  recordLog(material.businessId, userId, "EDIT_MATERIAL", `Edited material "${merged.name}"`);
+  recordLog(
+    material.businessId,
+    userId,
+    "EDIT_MATERIAL",
+    `Renamed material to "${updates.name}" (was "${material.name}")`,
+    { id: material.id, name: material.name },
+    { id: material.id, name: updates.name }
+  );
 
   const stocks = await getStocksForMaterials([materialId]);
   return buildMaterialResponse(merged, stocks);
@@ -156,7 +162,14 @@ async function deleteMaterial(userId, materialId) {
     throw new Error(error.message);
   }
 
-  recordLog(material.businessId, userId, "DELETE_MATERIAL", `Deleted material "${material.name}"`);
+  recordLog(
+    material.businessId,
+    userId,
+    "DELETE_MATERIAL",
+    `Removed material "${material.name}" from inventory`,
+    { id: material.id, name: material.name },
+    null
+  );
 }
 
 // Adds a new stock entry for a material and returns the updated material.
@@ -164,24 +177,38 @@ async function addStock(userId, materialId, details) {
   const material = await getMaterialOrThrow(materialId);
   await assertAction(userId, material.businessId, ACTIONS.ADD_STOCKS);
 
-  const { error } = await supabase.from("stocks").insert({
-    materialId,
-    businessId: material.businessId,
-    quantity: details.quantity,
-    mfg_price: details.mfg_price,
-    status: "available",
-  });
+  const { data: stockData, error } = await supabase
+    .from("stocks")
+    .insert({
+      materialId,
+      businessId: material.businessId,
+      quantity: details.quantity,
+      mfg_price: details.mfg_price,
+      status: "available",
+    })
+    .select("id")
+    .single();
 
   if (error) {
     throw new Error(error.message);
   }
 
-  recordLog(
-    material.businessId,
-    userId,
-    "ADD_STOCKS",
-    `Added ${details.quantity} stock to "${material.name}"`
-  );
+  // Automatically record the stock purchase as a MATERIALS expense.
+  // amount is stored as 0 here; the real cost is always derived at read time
+  // from the linked stock's mfg_price (quantity × mfg_price).
+  const { error: expenseError } = await supabase.from("expenses").insert({
+    title: `Stock: ${material.name}`,
+    category: "MATERIALS",
+    amount: 0,
+    remarks: `Added ₱${details.mfg_price} from "${material.name}"`,
+    created_by: userId,
+    businessId: material.businessId,
+    stock_id: stockData.id,
+  });
+
+  if (expenseError) {
+    throw new Error(expenseError.message);
+  }
 
   const stocks = await getStocksForMaterials([materialId]);
   return buildMaterialResponse(material, stocks);
@@ -198,7 +225,7 @@ async function searchMaterials(userId, businessId, query) {
 
   const { data, error } = await supabase
     .from("materials")
-    .select("id, name, type, unit")
+    .select("id, name")
     .eq("businessId", businessId)
     .is("deletedAt", null)
     .ilike("name", `%${term}%`)
@@ -228,7 +255,6 @@ async function getMaterialNamesByIds(materialIds) {
 }
 
 module.exports = {
-  VALID_TYPES,
   listMaterials,
   createMaterial,
   updateMaterial,

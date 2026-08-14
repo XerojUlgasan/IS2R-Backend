@@ -67,4 +67,50 @@ async function getStockHistory(req, res) {
   }
 }
 
-module.exports = { listStocks, getStockHistory };
+// PATCH /api/businesses/:businessId/stocks/:stockId — update quantity or mfg_price.
+async function updateStock(req, res) {
+  const { quantity, mfg_price } = req.body || {};
+
+  if (quantity !== undefined && (typeof quantity !== "number" || Number.isNaN(quantity) || quantity <= 0)) {
+    return res.status(400).json({ error: "quantity must be a number greater than 0" });
+  }
+  if (mfg_price !== undefined && (typeof mfg_price !== "number" || Number.isNaN(mfg_price))) {
+    return res.status(400).json({ error: "mfg_price must be a number" });
+  }
+
+  const updates = {};
+  if (quantity !== undefined) updates.quantity = quantity;
+  if (mfg_price !== undefined) updates.mfg_price = mfg_price;
+
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: "No editable fields provided" });
+  }
+
+  try {
+    const stock = await stockService.updateStock(
+      req.user.id,
+      req.params.businessId,
+      req.params.stockId,
+      updates
+    );
+    return res.status(200).json({ stock });
+  } catch (err) {
+    return sendError(res, err, "updateStock");
+  }
+}
+
+// DELETE /api/businesses/:businessId/stocks/:stockId — soft-delete a stock batch.
+async function deleteStock(req, res) {
+  try {
+    await stockService.deleteStock(
+      req.user.id,
+      req.params.businessId,
+      req.params.stockId
+    );
+    return res.status(204).send();
+  } catch (err) {
+    return sendError(res, err, "deleteStock");
+  }
+}
+
+module.exports = { listStocks, getStockHistory, updateStock, deleteStock };

@@ -253,11 +253,18 @@ async function acceptInvite(userId, businessId) {
 
   recordLog(businessId, userId, "ACCEPT_INVITE", `Accepted invitation as ${member.role}`);
 
+  // Fetch the granted actions for this membership.
+  const { data: actionsRow } = await supabase
+    .from("member_actions")
+    .select(ACTION_COLUMNS.join(", "))
+    .eq("memberId", member.id)
+    .maybeSingle();
+
   return {
     businessId,
     role: member.role,
     status: "accepted",
-    actions: allowedActions,
+    actions: allowedActionsFrom(actionsRow),
   };
 }
 

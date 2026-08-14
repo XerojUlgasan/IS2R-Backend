@@ -105,7 +105,7 @@ async function fetchReportData(businessId) {
   const [materialsRes, stocksRes, salesRes] = await Promise.all([
     supabase
       .from("materials")
-      .select("id, name, type, unit, created_at, deletedAt")
+      .select("id, name, created_at, deletedAt")
       .eq("businessId", businessId),
     supabase
       .from("stocks")
@@ -229,27 +229,11 @@ function computeReport({ materials, stocks, sales }, period, now) {
       id: material.id,
       name: material.name,
       remaining,
-      unit: material.unit,
       lastStocked: lastStocked ? toYmd(lastStocked) : null,
       status,
     });
   }
   lowStock.sort((a, b) => STATUS_RANK[a.status] - STATUS_RANK[b.status] || a.remaining - b.remaining);
-
-  // --- Type distribution (remaining units by material type). ---
-  const unitsByType = new Map();
-  for (const material of activeMaterials) {
-    const remaining = remainingByMaterial.get(material.id) || 0;
-    const type = material.type || "OTHER";
-    unitsByType.set(type, (unitsByType.get(type) || 0) + remaining);
-  }
-  const typeDistribution = [...unitsByType.entries()]
-    .map(([type, units]) => ({
-      type,
-      units,
-      pct: unitsOnHand > 0 ? Math.round((units / unitsOnHand) * 100) : 0,
-    }))
-    .sort((a, b) => b.units - a.units);
 
   // --- Top consumed this period. ---
   const topConsumed = [...consumedByMaterial.entries()]
@@ -291,7 +275,6 @@ function computeReport({ materials, stocks, sales }, period, now) {
     statusSplit: {
       availablePct: totalBatches > 0 ? Math.round((availableBatches / totalBatches) * 100) : 0,
     },
-    typeDistribution,
     lowStock,
     topConsumed,
     aging,

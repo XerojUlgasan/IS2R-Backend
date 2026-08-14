@@ -1,14 +1,15 @@
 const { supabase } = require("../lib/supabaseClient");
 const { assertOwner } = require("./membership.service");
+const { httpError } = require("../lib/httpError");
 
-const AUDIT_COLUMNS = "id, action, description, actorId, created_at";
+const AUDIT_COLUMNS = "id, action, description, actorId, created_at, previous_object, new_object";
 
 // Fire-and-forget audit write. Callers must NOT await this so it never adds to
 // the request's response time; failures are logged but never surface to the user.
-function recordLog(businessId, actorId, action, description) {
+function recordLog(businessId, actorId, action, description, previousObject = null, newObject = null) {
   supabase
     .from("audit_logs")
-    .insert({ businessId, actorId, action, description })
+    .insert({ businessId, actorId, action, description, previous_object: previousObject, new_object: newObject })
     .then(({ error }) => {
       if (error) {
         console.error(`[audit] failed to record ${action}:`, error.message);
@@ -24,6 +25,8 @@ function buildAuditLogResponse(log, user) {
     description: log.description,
     actor_name: user && user.fullname ? user.fullname : null,
     created_at: log.created_at,
+    previous_object: log.previous_object ?? null,
+    new_object: log.new_object ?? null,
   };
 }
 
@@ -50,10 +53,29 @@ async function getUsersByIds(userIds) {
   return new Map((data || []).map((u) => [u.userId, u]));
 }
 
+// Confirms the user is an owner or shareholder of the business; throws 403 otherwise.
+async function assertOwnerOrShareholder(userId, businessId) {
+  const { data, error } = await supabase
+    .from("business_members")
+    .select("role")
+    .eq("userId", userId)
+    .eq("businessId", businessId)
+    .eq("status", "accepted")
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data) throw httpError(403, "You are not a member of this business");
+
+  const role = (data.role || "").toLowerCase();
+  if (role !== "owner" && role !== "shareholder") {
+    throw httpError(403, "Only owners and shareholders can view audit logs");
+  }
+}
+
 // Lists a business's audit logs, newest first, paginated and optionally filtered.
-// Owner only.
+// Owner and Shareholder only.
 async function listAuditLogs(userId, businessId, filters) {
-  await assertOwner(userId, businessId);
+  await assertOwnerOrShareholder(userId, businessId);
 
   const { page, limit, action, dateFrom, dateTo, search } = filters;
   const from = (page - 1) * limit;

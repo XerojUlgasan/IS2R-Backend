@@ -96,7 +96,10 @@ async function getMonthOverview(businessId, dateStr) {
     // Shift to Manila local then extract the date.
     const local = new Date(ms + MANILA_OFFSET_MS);
     const key = `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, "0")}-${String(local.getUTCDate()).padStart(2, "0")}`;
-    dailyTotals.set(key, (dailyTotals.get(key) || 0) + (sale.total_amount || 0));
+    dailyTotals.set(
+      key,
+      (dailyTotals.get(key) || 0) + (sale.total_amount || 0),
+    );
   }
 
   // Build entries for each day of the requested month.
@@ -143,7 +146,10 @@ async function getYearOverview(businessId, dateStr) {
     const ms = new Date(sale.created_at).getTime();
     const local = new Date(ms + MANILA_OFFSET_MS);
     const key = `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, "0")}`;
-    monthlyTotals.set(key, (monthlyTotals.get(key) || 0) + (sale.total_amount || 0));
+    monthlyTotals.set(
+      key,
+      (monthlyTotals.get(key) || 0) + (sale.total_amount || 0),
+    );
   }
 
   const entries = [];
@@ -185,53 +191,59 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
   }
 
   // Run all queries in parallel.
-  const [salesRes, deletedSalesRes, stocksRes, deletedStocksRes, consumptionRes, materialsRes] =
-    await Promise.all([
-      // Non-deleted sales in period (only PAID count toward salesAmount)
-      supabase
-        .from("sales")
-        .select("id, materialId, qty_used, total_amount, status, created_at")
-        .eq("businessId", businessId)
-        .is("deletedAt", null)
-        .gte("created_at", periodStart)
-        .lt("created_at", periodEnd),
-      // Deleted sales (deletedAt within period)
-      supabase
-        .from("sales")
-        .select("id, materialId, deletedAt")
-        .eq("businessId", businessId)
-        .not("deletedAt", "is", null)
-        .gte("deletedAt", periodStart)
-        .lt("deletedAt", periodEnd),
-      // Non-deleted stocks added in period
-      supabase
-        .from("stocks")
-        .select("id, materialId, quantity, quantity_sold, created_at")
-        .eq("businessId", businessId)
-        .is("deletedAt", null)
-        .gte("created_at", periodStart)
-        .lt("created_at", periodEnd),
-      // Deleted stocks (deletedAt within period)
-      supabase
-        .from("stocks")
-        .select("id, materialId, deletedAt")
-        .eq("businessId", businessId)
-        .not("deletedAt", "is", null)
-        .gte("deletedAt", periodStart)
-        .lt("deletedAt", periodEnd),
-      // Consumption history within period
-      supabase
-        .from("stock_consumption_history")
-        .select("stockId, quantity_deducted, created_at")
-        .gte("created_at", periodStart)
-        .lt("created_at", periodEnd),
-      // All active materials for this business (for name/unit lookup)
-      supabase
-        .from("materials")
-        .select("id, name, unit")
-        .eq("businessId", businessId)
-        .is("deletedAt", null),
-    ]);
+  const [
+    salesRes,
+    deletedSalesRes,
+    stocksRes,
+    deletedStocksRes,
+    consumptionRes,
+    materialsRes,
+  ] = await Promise.all([
+    // Non-deleted sales in period (only PAID count toward salesAmount)
+    supabase
+      .from("sales")
+      .select("id, materialId, qty_used, total_amount, status, created_at")
+      .eq("businessId", businessId)
+      .is("deletedAt", null)
+      .gte("created_at", periodStart)
+      .lt("created_at", periodEnd),
+    // Deleted sales (deletedAt within period)
+    supabase
+      .from("sales")
+      .select("id, materialId, deletedAt")
+      .eq("businessId", businessId)
+      .not("deletedAt", "is", null)
+      .gte("deletedAt", periodStart)
+      .lt("deletedAt", periodEnd),
+    // Non-deleted stocks added in period
+    supabase
+      .from("stocks")
+      .select("id, materialId, quantity, quantity_sold, created_at")
+      .eq("businessId", businessId)
+      .is("deletedAt", null)
+      .gte("created_at", periodStart)
+      .lt("created_at", periodEnd),
+    // Deleted stocks (deletedAt within period)
+    supabase
+      .from("stocks")
+      .select("id, materialId, deletedAt")
+      .eq("businessId", businessId)
+      .not("deletedAt", "is", null)
+      .gte("deletedAt", periodStart)
+      .lt("deletedAt", periodEnd),
+    // Consumption history within period
+    supabase
+      .from("stock_consumption_history")
+      .select("stockId, quantity_deducted, created_at")
+      .gte("created_at", periodStart)
+      .lt("created_at", periodEnd),
+    // All active materials for this business (for name/unit lookup)
+    supabase
+      .from("materials")
+      .select("id, name")
+      .eq("businessId", businessId)
+      .is("deletedAt", null),
+  ]);
 
   if (salesRes.error) throw new Error(salesRes.error.message);
   if (deletedSalesRes.error) throw new Error(deletedSalesRes.error.message);
@@ -358,7 +370,6 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     materialsArr.push({
       id: materialId,
       name: mat ? mat.name : null,
-      unit: mat ? mat.unit : null,
       stockAdded: Math.round(a.stockAdded * 100) / 100,
       consumed: Math.round(a.consumed * 100) / 100,
       salesCount: a.salesCount,
