@@ -14,8 +14,14 @@ const dashboardRoutes = require("./src/routes/dashboard.routes");
 const calendarRoutes = require("./src/routes/calendar.routes");
 
 const app = express();
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || "*",
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 app.use(express.json());
-app.use(cors());
 
 app.get("/api/ping", (req, res) => {
   res.json({ message: "pong" });
