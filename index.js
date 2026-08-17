@@ -1,5 +1,5 @@
 const express = require("express");
-const cors = require("cors")
+const cors = require("cors");
 require("dotenv").config();
 
 const businessRoutes = require("./src/routes/business.routes");
@@ -15,7 +15,11 @@ const calendarRoutes = require("./src/routes/calendar.routes");
 
 const app = express();
 app.use(express.json());
-app.use(cors())
+app.use(cors());
+
+app.get("/api/ping", (req, res) => {
+  res.json({ message: "pong" });
+});
 
 // Auth is enforced per-route by the requireAuth middleware inside each router.
 app.use("/api/businesses", businessRoutes);
