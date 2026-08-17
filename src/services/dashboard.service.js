@@ -120,7 +120,8 @@ async function computeRevenue(businessId, now, weekStart, monthStart) {
 
 // Expense totals for both period windows (same windows as period revenue).
 async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
-  const fetchFrom = Math.min(weekStart, monthStart);
+  const startToday = startOfManilaDay(now);
+  const fetchFrom = Math.min(startToday, weekStart, monthStart);
 
   const { data, error } = await supabase
     .from("expenses")
@@ -132,19 +133,20 @@ async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
     throw new Error(error.message);
   }
 
+  let today = 0;
   let weekly = 0;
   let monthly = 0;
   for (const e of data || []) {
     const ms = new Date(e.created_at).getTime();
-    // Derive amount from stock for stock-linked expenses, otherwise use stored amount.
     const amount = (e.stock_id && e.stocks)
       ? e.stocks.mfg_price
       : (e.amount || 0);
+    if (ms >= startToday && ms <= now) today += amount;
     if (ms >= weekStart && ms <= now) weekly += amount;
     if (ms >= monthStart && ms <= now) monthly += amount;
   }
 
-  return { weekly: round2(weekly), monthly: round2(monthly) };
+  return { today: round2(today), weekly: round2(weekly), monthly: round2(monthly) };
 }
 
 // Inventory valuation, fully-consumed count, and the low-stock preview.
@@ -261,18 +263,44 @@ async function computeRecentSales(businessId) {
   }));
 }
 
-// Resolves whether the caller owns the business (gates the activity preview).
-async function isBusinessOwner(userId, businessId) {
+// Fetches the caller's role and cut_by_percentage from business_members.
+async function getMemberCut(userId, businessId) {
   const { data, error } = await supabase
-    .from("business")
-    .select("ownerId")
-    .eq("id", businessId)
+    .from("business_members")
+    .select("role, cut_by_percentage")
+    .eq("userId", userId)
+    .eq("businessId", businessId)
+    .eq("status", "accepted")
     .maybeSingle();
 
-  if (error) {
-    throw new Error(error.message);
-  }
-  return Boolean(data) && data.ownerId === userId;
+  if (error) throw new Error(error.message);
+  return data || null;
+}
+
+// Computes myCut for each period. Returns null for Staff or when cut is unset/zero.
+function computeMyCut(member, revenue, expenses) {
+  if (!member) return null;
+  const role = (member.role || "").toLowerCase();
+  if (role === "staff") return null;
+  const cut = member.cut_by_percentage;
+  if (!cut) return null;
+
+  const factor = cut / 100;
+  return {
+    cutPercentage: cut,
+    today: {
+      raw: round2(revenue.today * factor),
+      afterExpenses: round2((revenue.today - expenses.today) * factor),
+    },
+    weekly: {
+      raw: round2(revenue.weekly * factor),
+      afterExpenses: round2((revenue.weekly - expenses.weekly) * factor),
+    },
+    monthly: {
+      raw: round2(revenue.monthly * factor),
+      afterExpenses: round2((revenue.monthly - expenses.monthly) * factor),
+    },
+  };
 }
 
 // Builds the full dashboard summary for a business. Both the weekly and
@@ -284,15 +312,17 @@ async function getDashboard(userId, businessId) {
   const now = Date.now();
   const weekStart = startOfManilaWeek(now);
   const monthStart = startOfManilaMonth(now);
-  const owner = await isBusinessOwner(userId, businessId);
 
-  const [revenue, expenses, inventory, activity, recentSales] = await Promise.all([
+  const [revenue, expenses, inventory, recentSales, member] = await Promise.all([
     computeRevenue(businessId, now, weekStart, monthStart),
     computePeriodExpenses(businessId, now, weekStart, monthStart),
     computeInventory(businessId, now),
-    computeActivity(businessId, owner),
     computeRecentSales(businessId),
+    getMemberCut(userId, businessId),
   ]);
+
+  const owner = Boolean(member) && (member.role || "").toLowerCase() === "owner";
+  const activityRows = await computeActivity(businessId, owner);
 
   const summary = {
     todaysRevenue: revenue.today,
@@ -311,8 +341,9 @@ async function getDashboard(userId, businessId) {
     inventoryValue: inventory.inventoryValue,
     fullyConsumedCount: inventory.fullyConsumedCount,
     lowStock: inventory.lowStock,
-    activity,
+    activity: activityRows,
     recentSales,
+    myCut: computeMyCut(member, revenue, expenses),
   };
 
   const trend = pctChange(revenue.today, revenue.yesterday);

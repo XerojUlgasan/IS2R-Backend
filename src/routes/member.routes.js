@@ -11,6 +11,7 @@ router.use(requireAuth);
 router.get("/businesses/:businessId/members", memberController.listMembers);
 router.post("/businesses/:businessId/members/invite", memberController.inviteMember);
 router.patch("/businesses/:businessId/members/:memberId/permissions", memberController.updatePermissions);
+router.patch("/businesses/:businessId/members/:memberId/shareholder-cut", memberController.updateShareholderCut);
 router.delete("/businesses/:businessId/members/:memberId", memberController.removeMember);
 
 module.exports = router;

@@ -27,7 +27,7 @@ const STORABLE_PERMISSIONS = Object.keys(PERMISSION_TO_COLUMN);
 const VALID_PERMISSIONS = [...STORABLE_PERMISSIONS, ...IGNORED_PERMISSIONS];
 const INVITE_ROLES = ["Staff", "Shareholder"];
 
-const MEMBER_COLUMNS = "id, userId, email, role, status, acceptedAt, created_at";
+const MEMBER_COLUMNS = "id, userId, email, role, status, acceptedAt, created_at, cut_by_percentage";
 
 // Normalizes a stored role to the UI's title-case form.
 function normalizeRole(role) {
@@ -69,6 +69,7 @@ function buildMemberResponse(member, actions, user) {
     status: member.status,
     acceptedAt: member.acceptedAt,
     permissions: actionsToPermissions(actions),
+    cut_by_percentage: member.cut_by_percentage ?? null,
     avatar_url: null,
   };
 }
@@ -246,10 +247,14 @@ async function inviteMember(userId, businessId, details) {
   return buildMemberResponse(member, actions, user);
 }
 
-// Replaces a member's permission set (owner only).
+// Replaces a member's permission set (owner only, staff target only).
 async function updatePermissions(userId, businessId, memberId, permissions) {
   await assertOwner(userId, businessId);
   const member = await getMemberInBusinessOrThrow(businessId, memberId);
+
+  if ((member.role || "").toLowerCase() !== "staff") {
+    throw httpError(400, "Permissions can only be updated for Staff members");
+  }
 
   const previousActions = await getActionsForMember(memberId);
   const previousPermissions = actionsToPermissions(previousActions);
@@ -276,6 +281,55 @@ async function updatePermissions(userId, businessId, memberId, permissions) {
 
   const users = await getUsersByIds([member.userId]);
   return buildMemberResponse(member, actions, users.get(member.userId));
+}
+
+// Updates the cut_by_percentage for a shareholder member (owner only).
+async function updateShareholderCut(userId, businessId, memberId, percentage) {
+  await assertOwner(userId, businessId);
+  const member = await getMemberInBusinessOrThrow(businessId, memberId);
+
+  if (!(["shareholder", "owner"].includes((member.role || "").toLowerCase()))) {
+    throw httpError(400, "cut_by_percentage can only be set for Shareholder or Owner members");
+  }
+  if (typeof percentage !== "number" || percentage < 0 || percentage > 100) {
+    throw httpError(400, "percentage must be a number between 0 and 100");
+  }
+
+  // Sum existing cuts for all other accepted members (shareholders + owner), excluding this member.
+  const { data: others, error: othersError } = await supabase
+    .from("business_members")
+    .select("cut_by_percentage")
+    .eq("businessId", businessId)
+    .eq("status", "accepted")
+    .neq("id", memberId)
+    .not("cut_by_percentage", "is", null);
+
+  if (othersError) throw new Error(othersError.message);
+
+  const usedPercentage = (others || []).reduce((sum, m) => sum + (m.cut_by_percentage || 0), 0);
+  const remaining = 100 - usedPercentage;
+
+  if (percentage > remaining) {
+    throw httpError(
+      400,
+      `Only ${remaining.toFixed(2)}% is available; cannot assign ${percentage}%`
+    );
+  }
+
+  const { error } = await supabase
+    .from("business_members")
+    .update({ cut_by_percentage: percentage })
+    .eq("id", memberId);
+
+  if (error) throw new Error(error.message);
+
+  const users = await getUsersByIds([member.userId]);
+  const actions = await getActionsForMember(memberId);
+  return buildMemberResponse(
+    { ...member, cut_by_percentage: percentage },
+    actions,
+    users.get(member.userId)
+  );
 }
 
 // Permanently removes a member (owner only). The owner cannot be removed.
@@ -327,4 +381,5 @@ module.exports = {
   inviteMember,
   updatePermissions,
   removeMember,
+  updateShareholderCut,
 };

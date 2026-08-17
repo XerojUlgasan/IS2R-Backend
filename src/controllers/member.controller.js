@@ -93,6 +93,27 @@ async function updatePermissions(req, res) {
   }
 }
 
+// PATCH /api/businesses/:businessId/members/:memberId/shareholder-cut — set cut percentage.
+async function updateShareholderCut(req, res) {
+  const { percentage } = req.body || {};
+
+  if (typeof percentage !== "number") {
+    return res.status(400).json({ error: "percentage must be a number" });
+  }
+
+  try {
+    const member = await memberService.updateShareholderCut(
+      req.user.id,
+      req.params.businessId,
+      req.params.memberId,
+      percentage
+    );
+    return res.status(200).json({ member });
+  } catch (err) {
+    return sendError(res, err, "updateShareholderCut");
+  }
+}
+
 // DELETE /api/businesses/:businessId/members/:memberId — remove a member.
 async function removeMember(req, res) {
   try {
@@ -103,4 +124,4 @@ async function removeMember(req, res) {
   }
 }
 
-module.exports = { listMembers, inviteMember, updatePermissions, removeMember };
+module.exports = { listMembers, inviteMember, updatePermissions, removeMember, updateShareholderCut };
