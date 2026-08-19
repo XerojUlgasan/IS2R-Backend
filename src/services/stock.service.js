@@ -231,13 +231,34 @@ async function deleteStock(userId, businessId, stockId) {
 
   await assertAction(userId, businessId, ACTIONS.DELETE_STOCKS);
 
-  const { error } = await supabase
+  const deletedAt = new Date().toISOString();
+
+  const { error: stockError } = await supabase
     .from("stocks")
-    .update({ deletedAt: new Date().toISOString() })
+    .update({ deletedAt })
     .eq("id", stockId);
 
-  if (error) {
-    throw new Error(error.message);
+  if (stockError) {
+    throw new Error(stockError.message);
+  }
+
+  const { error: expenseError } = await supabase
+    .from("expenses")
+    .delete()
+    .eq("businessId", businessId)
+    .eq("stock_id", stockId);
+
+  if (expenseError) {
+    const { error: rollbackError } = await supabase
+      .from("stocks")
+      .update({ deletedAt: null })
+      .eq("id", stockId);
+
+    if (rollbackError) {
+      console.error("[deleteStock] failed to roll back stock deletion after expense cleanup error:", rollbackError);
+    }
+
+    throw new Error(expenseError.message);
   }
 
   const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
