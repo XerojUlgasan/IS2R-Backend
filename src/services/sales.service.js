@@ -11,7 +11,12 @@ const { recordLog } = require("./audit.service");
 const VALID_STATUSES = ["PENDING", "PAID", "SCRAP", "ABANDONED", "REJECT"];
 
 const SALE_COLUMNS =
-  "id, materialId, businessId, qty_used, total_amount, status, remarks, actorId, created_at";
+  "id, materialId, businessId, qty_used, total_amount, status, remarks, actorId, created_at, paid_at";
+
+// Revenue uses paid_at when present; legacy rows fall back to created_at.
+function getPaidTimestamp(sale) {
+  return sale.paid_at || sale.created_at;
+}
 
 async function getActorNamesByIds(actorIds) {
   if (!actorIds.length) return new Map();
@@ -34,6 +39,7 @@ function buildSaleResponse(sale, materialName, actorNames) {
     remarks: sale.remarks,
     created_by_name: actorNames?.get(sale.actorId) || null,
     created_at: sale.created_at,
+    paid_at: sale.paid_at || null,
   };
 }
 
@@ -132,6 +138,7 @@ function mapRpcError(error) {
 // Records a sale atomically via the create_sale RPC (locks stock, consumes FIFO, inserts).
 async function createSale(userId, businessId, details) {
   await assertAction(userId, businessId, ACTIONS.CREATE_SALES);
+  const paidAt = details.status === "PAID" ? new Date().toISOString() : null;
 
   const { data, error } = await supabase.rpc("create_sale", {
     p_business_id: businessId,
@@ -145,6 +152,18 @@ async function createSale(userId, businessId, details) {
 
   if (error) {
     throw mapRpcError(error);
+  }
+
+  if (paidAt && !data.paid_at) {
+    const { error: paidAtError } = await supabase
+      .from("sales")
+      .update({ paid_at: paidAt })
+      .eq("id", data.id);
+
+    if (paidAtError) {
+      throw new Error(paidAtError.message);
+    }
+    data.paid_at = paidAt;
   }
 
   const [names, actorNames] = await Promise.all([
@@ -165,9 +184,14 @@ async function updateSale(userId, businessId, saleId, updates) {
 
   await assertAction(userId, businessId, ACTIONS.UPDATE_SALES);
 
+  const nextUpdates = { ...updates };
+  if (nextUpdates.status === "PAID" && !sale.paid_at) {
+    nextUpdates.paid_at = new Date().toISOString();
+  }
+
   const { error } = await supabase
     .from("sales")
-    .update(updates)
+    .update(nextUpdates)
     .eq("id", saleId);
   if (error) {
     throw new Error(error.message);
@@ -187,11 +211,28 @@ async function updateSale(userId, businessId, saleId, updates) {
     userId,
     "UPDATE_SALE",
     `Updated sale for "${materialName}" — changed ${changedFields}`,
-    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, status: sale.status, remarks: sale.remarks },
-    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, ...updates }
+    {
+      id: sale.id,
+      materialId: sale.materialId,
+      qty_used: sale.qty_used,
+      total_amount: sale.total_amount,
+      status: sale.status,
+      remarks: sale.remarks,
+    },
+    {
+      id: sale.id,
+      materialId: sale.materialId,
+      qty_used: sale.qty_used,
+      total_amount: sale.total_amount,
+      ...nextUpdates,
+    },
   );
 
-  return buildSaleResponse({ ...sale, ...updates }, names.get(sale.materialId), actorNames);
+  return buildSaleResponse(
+    { ...sale, ...nextUpdates },
+    names.get(sale.materialId),
+    actorNames,
+  );
 }
 
 // Soft-deletes a sale and restores its stock atomically via the delete_sale RPC.
@@ -223,8 +264,15 @@ async function deleteSale(userId, businessId, saleId) {
     userId,
     "DELETE_SALE",
     `Deleted sale for "${materialName}" (qty: ${sale.qty_used}, amount: ₱${sale.total_amount})`,
-    { id: sale.id, materialId: sale.materialId, qty_used: sale.qty_used, total_amount: sale.total_amount, status: sale.status, remarks: sale.remarks },
-    null
+    {
+      id: sale.id,
+      materialId: sale.materialId,
+      qty_used: sale.qty_used,
+      total_amount: sale.total_amount,
+      status: sale.status,
+      remarks: sale.remarks,
+    },
+    null,
   );
 }
 
@@ -326,11 +374,13 @@ async function fetchReportData(businessId, prevStart, currentStart) {
   const [salesRes, consumptionRes] = await Promise.all([
     supabase
       .from("sales")
-      .select("materialId, qty_used, total_amount, created_at")
+      .select("materialId, qty_used, total_amount, created_at, paid_at")
       .eq("businessId", businessId)
       .eq("status", "PAID")
       .is("deletedAt", null)
-      .gte("created_at", new Date(prevStart).toISOString()),
+      .or(
+        `paid_at.gte.${new Date(prevStart).toISOString()},created_at.gte.${new Date(prevStart).toISOString()}`,
+      ),
     supabase
       .from("stock_consumption_history")
       .select(
@@ -373,7 +423,7 @@ function computeReport({ sales, consumption }, period, now, materialNames) {
   const prevRevByMaterial = new Map(); // id -> revenue
 
   for (const sale of sales) {
-    const ms = new Date(sale.created_at).getTime();
+    const ms = new Date(getPaidTimestamp(sale)).getTime();
     const amount = sale.total_amount || 0;
     const qty = sale.qty_used || 0;
 
@@ -459,7 +509,7 @@ async function getSalesReport(userId, businessId, period) {
     ...new Set(
       data.sales
         .filter((s) => {
-          const ms = new Date(s.created_at).getTime();
+          const ms = new Date(getPaidTimestamp(s)).getTime();
           return ms >= currentStart && ms < currentEnd;
         })
         .map((s) => s.materialId),

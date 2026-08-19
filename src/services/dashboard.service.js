@@ -19,7 +19,9 @@ const RECENT_SALES_LIMIT = 10;
 
 // UTC instant of the most recent Manila midnight at or before nowMs.
 function startOfManilaDay(nowMs) {
-  return Math.floor((nowMs + MANILA_OFFSET_MS) / DAY_MS) * DAY_MS - MANILA_OFFSET_MS;
+  return (
+    Math.floor((nowMs + MANILA_OFFSET_MS) / DAY_MS) * DAY_MS - MANILA_OFFSET_MS
+  );
 }
 
 // UTC instant of Monday 00:00 (Manila) of the current week.
@@ -33,7 +35,10 @@ function startOfManilaWeek(nowMs) {
 // UTC instant of the first day of the current Manila month at 00:00 local.
 function startOfManilaMonth(nowMs) {
   const shifted = new Date(nowMs + MANILA_OFFSET_MS);
-  return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - MANILA_OFFSET_MS;
+  return (
+    Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) -
+    MANILA_OFFSET_MS
+  );
 }
 
 // Signed whole-percent change; undefined when there's no prior base to compare.
@@ -75,6 +80,11 @@ async function getUserNamesByIds(userIds) {
   return new Map((data || []).map((u) => [u.userId, u.fullname]));
 }
 
+// Revenue uses paid_at when present; legacy rows fall back to created_at.
+function getPaidTimestamp(sale) {
+  return sale.paid_at || sale.created_at;
+}
+
 // Revenue KPIs (today + both periods) plus today's trend vs the same window
 // yesterday. Fetches one bounded slice of sales and buckets it in memory.
 async function computeRevenue(businessId, now, weekStart, monthStart) {
@@ -84,11 +94,13 @@ async function computeRevenue(businessId, now, weekStart, monthStart) {
 
   const { data, error } = await supabase
     .from("sales")
-    .select("total_amount, created_at")
+    .select("total_amount, paid_at, created_at")
     .eq("businessId", businessId)
     .eq("status", "PAID")
     .is("deletedAt", null)
-    .gte("created_at", new Date(fetchFrom).toISOString());
+    .or(
+      `paid_at.gte.${new Date(fetchFrom).toISOString()},created_at.gte.${new Date(fetchFrom).toISOString()}`,
+    );
 
   if (error) {
     throw new Error(error.message);
@@ -100,7 +112,7 @@ async function computeRevenue(businessId, now, weekStart, monthStart) {
   let monthly = 0;
 
   for (const sale of data || []) {
-    const ms = new Date(sale.created_at).getTime();
+    const ms = new Date(getPaidTimestamp(sale)).getTime();
     const amount = sale.total_amount || 0;
 
     if (ms >= startToday && ms <= now) today += amount;
@@ -138,15 +150,17 @@ async function computePeriodExpenses(businessId, now, weekStart, monthStart) {
   let monthly = 0;
   for (const e of data || []) {
     const ms = new Date(e.created_at).getTime();
-    const amount = (e.stock_id && e.stocks)
-      ? e.stocks.mfg_price
-      : (e.amount || 0);
+    const amount = e.stock_id && e.stocks ? e.stocks.mfg_price : e.amount || 0;
     if (ms >= startToday && ms <= now) today += amount;
     if (ms >= weekStart && ms <= now) weekly += amount;
     if (ms >= monthStart && ms <= now) monthly += amount;
   }
 
-  return { today: round2(today), weekly: round2(weekly), monthly: round2(monthly) };
+  return {
+    today: round2(today),
+    weekly: round2(weekly),
+    monthly: round2(monthly),
+  };
 }
 
 // Inventory valuation, fully-consumed count, and the low-stock preview.
@@ -176,7 +190,7 @@ async function computeInventory(businessId, now) {
     const remaining = remainingOf(stock);
     remainingByMaterial.set(
       stock.materialId,
-      (remainingByMaterial.get(stock.materialId) || 0) + remaining
+      (remainingByMaterial.get(stock.materialId) || 0) + remaining,
     );
     // mfg_price is the price for the batch's full quantity, so prorate it to
     // the remaining units rather than treating it as a per-unit price.
@@ -193,18 +207,27 @@ async function computeInventory(businessId, now) {
 
     const status = lowStockStatus(remaining);
     if (status) {
-      lowStock.push({ id: material.id, name: material.name, remaining, _status: status });
+      lowStock.push({
+        id: material.id,
+        name: material.name,
+        remaining,
+        _status: status,
+      });
     }
   }
 
   lowStock.sort(
-    (a, b) => STATUS_RANK[a._status] - STATUS_RANK[b._status] || a.remaining - b.remaining
+    (a, b) =>
+      STATUS_RANK[a._status] - STATUS_RANK[b._status] ||
+      a.remaining - b.remaining,
   );
 
   return {
     inventoryValue: Math.round(inventoryValue),
     fullyConsumedCount,
-    lowStock: lowStock.slice(0, LOW_STOCK_LIMIT).map(({ _status, ...row }) => row),
+    lowStock: lowStock
+      .slice(0, LOW_STOCK_LIMIT)
+      .map(({ _status, ...row }) => row),
   };
 }
 
@@ -234,7 +257,9 @@ async function computeActivity(businessId, isOwner) {
 async function computeRecentSales(businessId) {
   const { data, error } = await supabase
     .from("sales")
-    .select("id, materialId, qty_used, total_amount, status, remarks, actorId, created_at")
+    .select(
+      "id, materialId, qty_used, total_amount, status, remarks, actorId, created_at",
+    )
     .eq("businessId", businessId)
     .eq("status", "PAID")
     .is("deletedAt", null)
@@ -313,15 +338,18 @@ async function getDashboard(userId, businessId) {
   const weekStart = startOfManilaWeek(now);
   const monthStart = startOfManilaMonth(now);
 
-  const [revenue, expenses, inventory, recentSales, member] = await Promise.all([
-    computeRevenue(businessId, now, weekStart, monthStart),
-    computePeriodExpenses(businessId, now, weekStart, monthStart),
-    computeInventory(businessId, now),
-    computeRecentSales(businessId),
-    getMemberCut(userId, businessId),
-  ]);
+  const [revenue, expenses, inventory, recentSales, member] = await Promise.all(
+    [
+      computeRevenue(businessId, now, weekStart, monthStart),
+      computePeriodExpenses(businessId, now, weekStart, monthStart),
+      computeInventory(businessId, now),
+      computeRecentSales(businessId),
+      getMemberCut(userId, businessId),
+    ],
+  );
 
-  const owner = Boolean(member) && (member.role || "").toLowerCase() === "owner";
+  const owner =
+    Boolean(member) && (member.role || "").toLowerCase() === "owner";
   const activityRows = await computeActivity(businessId, owner);
 
   const summary = {

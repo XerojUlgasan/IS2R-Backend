@@ -38,6 +38,11 @@ function round2(n) {
   return Math.round((n || 0) * 100) / 100;
 }
 
+// Revenue uses paid_at when present; legacy rows fall back to created_at.
+function getPaidTimestamp(sale) {
+  return sale.paid_at || sale.created_at;
+}
+
 // Compute percentage change; null only when both periods have zero sales
 // (nothing meaningful to show). When previous is 0 but current > 0, that's
 // a +100% gain. When current is 0 but previous > 0, that's -100%.
@@ -84,19 +89,23 @@ async function getMonthOverview(businessId, dateStr) {
 
   const { data, error } = await supabase
     .from("sales")
-    .select("total_amount, created_at")
+    .select("total_amount, paid_at, created_at")
     .eq("businessId", businessId)
     .eq("status", "PAID")
     .is("deletedAt", null)
-    .gte("created_at", fetchStart)
-    .lt("created_at", fetchEnd);
+    .or(`paid_at.gte.${fetchStart},created_at.gte.${fetchStart}`);
 
   if (error) throw new Error(error.message);
 
   // Bucket totals by Manila-local day key "YYYY-MM-DD".
   const dailyTotals = new Map();
   for (const sale of data || []) {
-    const ms = new Date(sale.created_at).getTime();
+    const ms = new Date(getPaidTimestamp(sale)).getTime();
+    if (
+      ms < new Date(fetchStart).getTime() ||
+      ms >= new Date(fetchEnd).getTime()
+    )
+      continue;
     // Shift to Manila local then extract the date.
     const local = new Date(ms + MANILA_OFFSET_MS);
     const key = `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, "0")}-${String(local.getUTCDate()).padStart(2, "0")}`;
@@ -135,19 +144,23 @@ async function getYearOverview(businessId, dateStr) {
 
   const { data, error } = await supabase
     .from("sales")
-    .select("total_amount, created_at")
+    .select("total_amount, paid_at, created_at")
     .eq("businessId", businessId)
     .eq("status", "PAID")
     .is("deletedAt", null)
-    .gte("created_at", fetchStart)
-    .lt("created_at", fetchEnd);
+    .or(`paid_at.gte.${fetchStart},created_at.gte.${fetchStart}`);
 
   if (error) throw new Error(error.message);
 
   // Bucket by Manila-local "YYYY-MM".
   const monthlyTotals = new Map();
   for (const sale of data || []) {
-    const ms = new Date(sale.created_at).getTime();
+    const ms = new Date(getPaidTimestamp(sale)).getTime();
+    if (
+      ms < new Date(fetchStart).getTime() ||
+      ms >= new Date(fetchEnd).getTime()
+    )
+      continue;
     const local = new Date(ms + MANILA_OFFSET_MS);
     const key = `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, "0")}`;
     monthlyTotals.set(
@@ -194,55 +207,57 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     periodEnd = bounds.end;
   }
 
+  const isWithinPeriod = (value) => {
+    if (!value) return false;
+    const ms = new Date(value).getTime();
+    return (
+      ms >= new Date(periodStart).getTime() &&
+      ms < new Date(periodEnd).getTime()
+    );
+  };
+
   // Run all queries in parallel.
   const [
     salesRes,
-    deletedSalesRes,
+    paidSalesRes,
     stocksRes,
-    deletedStocksRes,
     consumptionRes,
     materialsRes,
     expensesRes,
   ] = await Promise.all([
-    // Non-deleted sales in period (only PAID count toward salesAmount)
+    // Sales created in the period.
     supabase
       .from("sales")
-      .select("id, materialId, qty_used, total_amount, status, created_at")
-      .eq("businessId", businessId)
-      .is("deletedAt", null)
-      .gte("created_at", periodStart)
-      .lt("created_at", periodEnd),
-    // Deleted sales (deletedAt within period)
-    supabase
-      .from("sales")
-      .select("id, materialId, deletedAt")
-      .eq("businessId", businessId)
-      .not("deletedAt", "is", null)
-      .gte("deletedAt", periodStart)
-      .lt("deletedAt", periodEnd),
-    // Non-deleted stocks added in period
-    supabase
-      .from("stocks")
       .select(
-        "id, materialId, quantity, quantity_sold, mfg_price, status, created_at, deletedAt",
+        "id, materialId, qty_used, total_amount, status, remarks, created_at, paid_at",
       )
       .eq("businessId", businessId)
       .is("deletedAt", null)
       .gte("created_at", periodStart)
       .lt("created_at", periodEnd),
-    // Deleted stocks (deletedAt within period)
+    // Paid sales whose paid_at falls in the period, even if they were created earlier.
+    supabase
+      .from("sales")
+      .select(
+        "id, materialId, qty_used, total_amount, status, remarks, created_at, paid_at",
+      )
+      .eq("businessId", businessId)
+      .eq("status", "PAID")
+      .is("deletedAt", null)
+      .or(`paid_at.gte.${periodStart},created_at.gte.${periodStart}`),
+    // Stocks added in the period.
     supabase
       .from("stocks")
-      .select("id, materialId, deletedAt")
+      .select("id, materialId, quantity, quantity_sold, mfg_price, created_at")
       .eq("businessId", businessId)
-      .not("deletedAt", "is", null)
-      .gte("deletedAt", periodStart)
-      .lt("deletedAt", periodEnd),
+      .gte("created_at", periodStart)
+      .lt("created_at", periodEnd),
     // Consumption history within period
     supabase
       .from("stock_consumption_history")
       .select("stockId, quantity_deducted, remaining_stock, created_at")
       .gte("created_at", periodStart)
+      .eq("business_id", businessId)
       .lt("created_at", periodEnd),
     // All active materials for this business (for name/unit lookup)
     supabase
@@ -250,40 +265,33 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
       .select("id, name")
       .eq("businessId", businessId)
       .is("deletedAt", null),
-    // Expenses in the period for profit and loss reporting.
+    // Expenses in the period for the expense section.
     supabase
       .from("expenses")
-      .select("id, category, amount, remarks, stock_id, created_at")
+      .select("id, title, category, amount, remarks, stock_id, created_at")
       .eq("businessId", businessId)
       .gte("created_at", periodStart)
       .lt("created_at", periodEnd),
   ]);
 
   if (salesRes.error) throw new Error(salesRes.error.message);
-  if (deletedSalesRes.error) throw new Error(deletedSalesRes.error.message);
+  if (paidSalesRes.error) throw new Error(paidSalesRes.error.message);
   if (stocksRes.error) throw new Error(stocksRes.error.message);
-  if (deletedStocksRes.error) throw new Error(deletedStocksRes.error.message);
   if (consumptionRes.error) throw new Error(consumptionRes.error.message);
   if (materialsRes.error) throw new Error(materialsRes.error.message);
   if (expensesRes.error) throw new Error(expensesRes.error.message);
 
   const sales = salesRes.data || [];
-  const deletedSales = deletedSalesRes.data || [];
+  const paidSales = paidSalesRes.data || [];
   const stocks = stocksRes.data || [];
-  const deletedStocks = deletedStocksRes.data || [];
   const consumptions = consumptionRes.data || [];
   const materials = materialsRes.data || [];
   const expenses = expensesRes.data || [];
 
-  // Build a stockId -> materialId map for consumption lookup.
-  // We need stocks from the whole business, not just the period, since
-  // consumption history references stocks created at any time.
-  // However we already have stocks created this period; for older stocks
-  // referenced in consumption history we need an extra lookup.
-  const stockById = new Map();
-  for (const s of stocks) stockById.set(s.id, s);
+  // Keep every stock lookup in one initialized map. Consumption and expense
+  // records may refer to stocks created outside the requested calendar period.
+  const stockById = new Map(stocks.map((stock) => [stock.id, stock]));
 
-  // Gather any stockIds referenced by consumption or expenses that we don't have yet.
   const missingStockIds = [
     ...consumptions.map((c) => c.stockId),
     ...expenses.filter((e) => e.stock_id).map((e) => e.stock_id),
@@ -293,39 +301,47 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     const uniqueIds = [...new Set(missingStockIds)];
     const { data: extraStocks, error: extraErr } = await supabase
       .from("stocks")
-      .select(
-        "id, materialId, quantity, quantity_sold, mfg_price, status, created_at, deletedAt",
-      )
+      .select("id, materialId, quantity, quantity_sold, mfg_price, created_at")
       .in("id", uniqueIds);
     if (extraErr) throw new Error(extraErr.message);
     for (const s of extraStocks || []) stockById.set(s.id, s);
   }
 
-  // Material lookup map.
   const materialMap = new Map(materials.map((m) => [m.id, m]));
-
-  // Per-material accumulators.
-  const acc = new Map(); // materialId -> { salesCount, salesAmount, scrapCount, abandonedCount, stockAdded, consumed, deletedSales, deletedStocks }
-
   const salesByMaterialAcc = new Map();
   const stockConsumptionByMaterial = new Map();
   const stockConsumptionById = new Map();
-  const consumedStockIds = new Set();
-  const expenseByCategory = new Map();
-  const stockExpenseRows = [];
+  const expenseRows = [];
+  const relevantSales = new Map();
+
+  for (const sale of sales) {
+    if (sale.status === "PAID") {
+      if (isWithinPeriod(sale.paid_at)) {
+        relevantSales.set(sale.id, sale);
+      }
+      continue;
+    }
+    relevantSales.set(sale.id, sale);
+  }
+
+  for (const sale of paidSales) {
+    if (!isWithinPeriod(getPaidTimestamp(sale))) continue;
+    if (!relevantSales.has(sale.id)) {
+      relevantSales.set(sale.id, sale);
+    }
+  }
 
   function getSalesBucket(materialId) {
     if (!salesByMaterialAcc.has(materialId)) {
       salesByMaterialAcc.set(materialId, {
         materialId,
+        name: materialMap.get(materialId)
+          ? materialMap.get(materialId).name
+          : null,
         paid: 0,
         pending: 0,
-        scrap: 0,
-        abandoned: 0,
-        reject: 0,
-        salesAmount: 0,
-        deletedSales: 0,
         qtyConsumed: 0,
+        salesAmount: 0,
       });
     }
     return salesByMaterialAcc.get(materialId);
@@ -338,7 +354,6 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
         materialId,
         name: material ? material.name : null,
         totalConsumed: 0,
-        batchesConsumed: 0,
         stockAdded: 0,
         remainingStock: 0,
         scrapQty: 0,
@@ -351,68 +366,38 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     return stockConsumptionByMaterial.get(materialId);
   }
 
-  function getAcc(materialId) {
-    if (!acc.has(materialId)) {
-      acc.set(materialId, {
-        salesCount: 0,
-        salesAmount: 0,
-        scrapQty: 0,
-        abandonedQty: 0,
-        stockAdded: 0,
-        consumed: 0,
-        deletedSales: 0,
-        deletedStocks: 0,
-      });
-    }
-    return acc.get(materialId);
-  }
+  let totalRevenue = 0;
+  let totalSalesCount = 0;
+  let pendingSalesCount = 0;
 
-  // Sales
-  for (const sale of sales) {
-    const a = getAcc(sale.materialId);
-    a.salesCount += 1;
-    if (sale.status === "PAID") getSalesBucket(sale.materialId).qtyConsumed += sale.qty_used || 0;
-    // Only PAID sales contribute to revenue amounts.
+  for (const sale of relevantSales.values()) {
+    const bucket = getSalesBucket(sale.materialId);
+    totalSalesCount += 1;
+
     if (sale.status === "PAID") {
-      a.salesAmount += sale.total_amount || 0;
-      getSalesBucket(sale.materialId).paid += 1;
+      const amount = sale.total_amount || 0;
+      bucket.paid += 1;
+      bucket.qtyConsumed += sale.qty_used || 0;
+      bucket.salesAmount += amount;
+      totalRevenue += amount;
       getStockConsumptionBucket(sale.materialId).soldQty += sale.qty_used || 0;
+    } else if (sale.status === "PENDING") {
+      bucket.pending += 1;
+      pendingSalesCount += 1;
     } else if (sale.status === "SCRAP") {
-      a.scrapQty += sale.qty_used || 0;
-      getSalesBucket(sale.materialId).scrap += 1;
       getStockConsumptionBucket(sale.materialId).scrapQty += sale.qty_used || 0;
     } else if (sale.status === "ABANDONED") {
-      a.abandonedQty += sale.qty_used || 0;
-      getSalesBucket(sale.materialId).abandoned += 1;
-      getStockConsumptionBucket(sale.materialId).abandonedQty += sale.qty_used || 0;
-    } else if (sale.status === "PENDING") {
-      getSalesBucket(sale.materialId).pending += 1;
+      getStockConsumptionBucket(sale.materialId).abandonedQty +=
+        sale.qty_used || 0;
     } else if (sale.status === "REJECT") {
-      getSalesBucket(sale.materialId).reject += 1;
-      getStockConsumptionBucket(sale.materialId).rejectQty += sale.qty_used || 0;
-    }
-    if (sale.status === "PAID") {
-      getSalesBucket(sale.materialId).salesAmount += sale.total_amount || 0;
+      getStockConsumptionBucket(sale.materialId).rejectQty +=
+        sale.qty_used || 0;
     }
   }
 
-  // Deleted sales
-  for (const sale of deletedSales) {
-    const a = getAcc(sale.materialId);
-    a.deletedSales += 1;
-    getSalesBucket(sale.materialId).deletedSales += 1;
-  }
-
-  // Stocks added
   for (const stock of stocks) {
-    const a = getAcc(stock.materialId);
-    a.stockAdded += stock.quantity || 0;
-  }
-
-  // Deleted stocks
-  for (const stock of deletedStocks) {
-    const a = getAcc(stock.materialId);
-    a.deletedStocks += 1;
+    const bucket = getStockConsumptionBucket(stock.materialId);
+    bucket.stockAdded += stock.quantity || 0;
   }
 
   // Consumption
@@ -420,9 +405,6 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
     const stock = stockById.get(c.stockId);
     const materialId = stock ? stock.materialId : null;
     if (!materialId) continue;
-    const a = getAcc(materialId);
-    a.consumed += c.quantity_deducted || 0;
-
     const stockEntry = stockConsumptionById.get(c.stockId) || {
       stockId: c.stockId,
       totalDeducted: 0,
@@ -439,225 +421,82 @@ async function getCalendarDetail(userId, businessId, type, dateStr) {
       stockEntry.latestRemaining = c.remaining_stock || 0;
     }
     stockConsumptionById.set(c.stockId, stockEntry);
-    consumedStockIds.add(c.stockId);
   }
 
-  // Expenses and stock expense detail.
-  let totalExpenses = 0;
   for (const expense of expenses) {
-    const category = expense.category || "OTHER";
-    const amount =
-      expense.stock_id && stockById.get(expense.stock_id)
-        ? stockById.get(expense.stock_id).mfg_price || 0
-        : expense.amount || 0;
-    totalExpenses += amount;
-
-    if (expense.stock_id) {
-      const stock = stockById.get(expense.stock_id);
-      stockExpenseRows.push({
-        expenseId: expense.id,
-        materialName:
-          stock && materialMap.get(stock.materialId)
-            ? materialMap.get(stock.materialId).name
-            : null,
-        batchId: expense.stock_id,
-        category,
-        amount: round2(amount),
-        remarks: expense.remarks || null,
-        created_at: expense.created_at,
-      });
-      continue;
-    }
-
-    if (!expenseByCategory.has(category)) {
-      expenseByCategory.set(category, {
-        category,
-        count: 0,
-        totalAmount: 0,
-        remarks: [],
-      });
-    }
-    const bucket = expenseByCategory.get(category);
-    bucket.count += 1;
-    bucket.totalAmount += amount;
-    if (expense.remarks) bucket.remarks.push(expense.remarks);
-  }
-
-  // Consumption batches by material and cogs tracking.
-  let cogs = 0;
-  const uniqueConsumedStockIds = [...consumedStockIds];
-  for (const stockId of uniqueConsumedStockIds) {
-    const stock = stockById.get(stockId);
-    if (!stock) continue;
-    cogs += stock.mfg_price || 0;
+    const stock = expense.stock_id ? stockById.get(expense.stock_id) : null;
+    const linkedMaterial =
+      stock && materialMap.get(stock.materialId)
+        ? materialMap.get(stock.materialId).name
+        : null;
+    const amount = stock ? stock.mfg_price || 0 : expense.amount || 0;
+    expenseRows.push({
+      title: expense.title,
+      category: expense.category || "OTHER",
+      amount: round2(amount),
+      remarks: expense.remarks || null,
+      linkedMaterial,
+    });
   }
 
   for (const [, entry] of stockConsumptionById.entries()) {
     const stock = stockById.get(entry.stockId);
-    if (!stock || (stock.deletedAt !== null && stock.deletedAt !== undefined))
-      continue;
+    if (!stock) continue;
     const material = materialMap.get(stock.materialId);
     const bucket = getStockConsumptionBucket(stock.materialId);
     bucket.totalConsumed += entry.totalDeducted;
-    bucket.batchesConsumed += 1;
     bucket.remainingStock += entry.latestRemaining || 0;
-    bucket.batches.push({
-      batchId: stock.id,
-      mfgPrice: round2(stock.mfg_price || 0),
-      qtyAdded: round2(stock.quantity || 0),
-      qtyDeducted: round2(entry.totalDeducted),
-      remainingStock: round2(entry.latestRemaining || 0),
-      status: "ACTIVE",
-    });
     if (!bucket.name && material) bucket.name = material.name;
   }
 
-  // Build response.
-  let totalSalesAmount = 0;
-  let totalSalesCount = 0;
-  let totalStockAdded = 0;
-  let totalConsumed = 0;
-  let totalScrapQty = 0;
-  let totalAbandonedQty = 0;
-  let deletedSalesCount = 0;
-  let deletedStocksCount = 0;
-  let pendingSalesCount = 0;
-  let scrapCount = 0;
-  let abandonedCount = 0;
-  let rejectedCount = 0;
-
-  const materialsArr = [];
-  for (const [materialId, a] of acc.entries()) {
-    // Only include materials with any activity.
-    if (
-      a.salesCount === 0 &&
-      a.stockAdded === 0 &&
-      a.consumed === 0 &&
-      a.deletedSales === 0 &&
-      a.deletedStocks === 0
-    )
-      continue;
-
-    const mat = materialMap.get(materialId);
-    materialsArr.push({
-      id: materialId,
-      name: mat ? mat.name : null,
-      stockAdded: round2(a.stockAdded),
-      consumed: round2(a.consumed),
-      salesCount: a.salesCount,
-      salesAmount: round2(a.salesAmount),
-      scrapQty: round2(a.scrapQty),
-      abandonedQty: round2(a.abandonedQty),
-      deletedSales: a.deletedSales,
-      deletedStocks: a.deletedStocks,
-    });
-
-    totalSalesAmount += a.salesAmount;
-    totalSalesCount += a.salesCount;
-    totalStockAdded += a.stockAdded;
-    totalConsumed += a.consumed;
-    totalScrapQty += a.scrapQty;
-    totalAbandonedQty += a.abandonedQty;
-    deletedSalesCount += a.deletedSales;
-    deletedStocksCount += a.deletedStocks;
-  }
-
-  const salesByMaterial = [];
-  for (const [materialId, bucket] of salesByMaterialAcc.entries()) {
-    const mat = materialMap.get(materialId);
-    salesByMaterial.push({
-      materialId,
-      name: mat ? mat.name : null,
+  const salesByMaterial = [...salesByMaterialAcc.values()]
+    .map((bucket) => ({
+      materialId: bucket.materialId,
+      name: bucket.name,
       paid: bucket.paid,
       pending: bucket.pending,
-      scrap: bucket.scrap,
-      abandoned: bucket.abandoned,
-      reject: bucket.reject,
-      salesAmount: round2(bucket.salesAmount),
-      deletedSales: bucket.deletedSales,
       qtyConsumed: Math.round(bucket.qtyConsumed * 100) / 100,
-    });
-
-    pendingSalesCount += bucket.pending;
-    scrapCount += bucket.scrap;
-    abandonedCount += bucket.abandoned;
-    rejectedCount += bucket.reject;
-  }
-  salesByMaterial.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-
-  // Sort materials alphabetically for stable ordering.
-  materialsArr.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-
-  const stockConsumption = [...stockConsumptionByMaterial.values()].map(
-    (entry) => ({
-      materialId: entry.materialId,
-      name: entry.name,
-      totalConsumed: round2(entry.totalConsumed),
-      batchesConsumed: entry.batchesConsumed,
-      stockAdded: round2(
-        stocks
-          .filter((stock) => stock.materialId === entry.materialId)
-          .reduce((sum, stock) => sum + (stock.quantity || 0), 0),
-      ),
-      remainingStock: round2(entry.remainingStock),
-      scrapQty: round2(entry.scrapQty),
-      abandonedQty: round2(entry.abandonedQty),
-      rejectQty: round2(entry.rejectQty),
-      soldQty: round2(entry.soldQty),
-      batches: entry.batches.sort((a, b) =>
-        (a.batchId || "").localeCompare(b.batchId || ""),
-      ),
-    }),
-  );
-  stockConsumption.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-
-  const generalExpenses = [...expenseByCategory.values()]
-    .map((bucket) => ({
-      category: bucket.category,
-      count: bucket.count,
-      totalAmount: round2(bucket.totalAmount),
-      remarks: bucket.remarks.join(" | "),
+      salesAmount: round2(bucket.salesAmount),
     }))
-    .sort((a, b) => (a.category || "").localeCompare(b.category || ""));
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
-  stockExpenseRows.sort((a, b) => {
-    const nameCompare = (a.materialName || "").localeCompare(
-      b.materialName || "",
-    );
-    if (nameCompare !== 0) return nameCompare;
-    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+  const stockConsumption = [...stockConsumptionByMaterial.values()]
+    .map((bucket) => ({
+      materialId: bucket.materialId,
+      name: bucket.name,
+      totalConsumed: round2(bucket.totalConsumed),
+      soldQty: round2(bucket.soldQty),
+      scrapQty: round2(bucket.scrapQty),
+      abandonedQty: round2(bucket.abandonedQty),
+      rejectQty: round2(bucket.rejectQty),
+      stockAdded: round2(bucket.stockAdded),
+      remainingStock: round2(bucket.remainingStock),
+    }))
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+
+  const expensesList = expenseRows.sort((a, b) => {
+    const titleCompare = (a.title || "").localeCompare(b.title || "");
+    if (titleCompare !== 0) return titleCompare;
+    return (a.category || "").localeCompare(b.category || "");
   });
 
-  const stockExpenses = stockExpenseRows.map(({ created_at, ...row }) => row);
-
-  const revenue = round2(totalSalesAmount);
-  const cogsTotal = round2(cogs);
-  const grossProfit = round2(revenue - cogsTotal);
-  const netProfitLoss = round2(grossProfit - totalExpenses);
+  const revenue = round2(totalRevenue);
+  const expensesTotal = round2(
+    expensesList.reduce((sum, expense) => sum + (expense.amount || 0), 0),
+  );
 
   return {
-    totalSalesAmount: revenue,
+    totalRevenue: revenue,
     totalSalesCount,
-    totalStockAdded: round2(totalStockAdded),
-    totalConsumed: round2(totalConsumed),
-    totalScrapQty: round2(totalScrapQty),
-    totalAbandonedQty: round2(totalAbandonedQty),
-    deletedSalesCount,
-    deletedStocksCount,
     pendingSalesCount,
-    scrapCount,
-    abandonedCount,
-    rejectedCount,
-    totalExpenses: round2(totalExpenses),
-    revenue,
-    cogs: cogsTotal,
-    grossProfit,
-    netProfitLoss,
+    totalExpenses: expensesTotal,
+    profitLossSummary: {
+      revenue,
+      totalExpenses: expensesTotal,
+    },
     salesByMaterial,
     stockConsumption,
-    generalExpenses,
-    stockExpenses,
-    materials: materialsArr,
+    expenses: expensesList,
   };
 }
 

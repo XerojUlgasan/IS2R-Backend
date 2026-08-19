@@ -1,6 +1,10 @@
 const { supabase } = require("../lib/supabaseClient");
 const { httpError } = require("../lib/httpError");
-const { assertMembership, assertAction, ACTIONS } = require("./membership.service");
+const {
+  assertMembership,
+  assertAction,
+  ACTIONS,
+} = require("./membership.service");
 const materialService = require("./material.service");
 const { recordLog } = require("./audit.service");
 
@@ -46,7 +50,9 @@ async function listStocks(userId, businessId, filters) {
   // batches entirely, keeping the paginated count accurate.
   let query = supabase
     .from("stocks")
-    .select(`${STOCK_COLUMNS}, materials!inner(name, deletedAt)`, { count: "exact" })
+    .select(`${STOCK_COLUMNS}, materials!inner(name, deletedAt)`, {
+      count: "exact",
+    })
     .eq("businessId", businessId)
     .is("deletedAt", null)
     .is("materials.deletedAt", null);
@@ -80,7 +86,9 @@ async function listStocks(userId, businessId, filters) {
 async function getStockForBusinessOrThrow(stockId, businessId) {
   const { data, error } = await supabase
     .from("stocks")
-    .select("id, businessId, materialId, quantity, quantity_sold, mfg_price, status, created_at")
+    .select(
+      "id, businessId, materialId, quantity, quantity_sold, mfg_price, status, created_at",
+    )
     .eq("id", stockId)
     .is("deletedAt", null)
     .maybeSingle();
@@ -152,7 +160,7 @@ async function getStockHistory(userId, businessId, stockId, filters) {
     .from("stock_consumption_history")
     .select(
       "id, quantity_deducted, remaining_stock, created_at, sales!inner(status, deletedAt, actorId)",
-      { count: "exact" }
+      { count: "exact" },
     )
     .eq("stockId", stockId)
     .order("created_at", { ascending: false })
@@ -166,9 +174,13 @@ async function getStockHistory(userId, businessId, stockId, filters) {
   const rows = data || [];
   const total = count || 0;
 
-  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialNames = await materialService.getMaterialNamesByIds([
+    stock.materialId,
+  ]);
   const materialName = materialNames.get(stock.materialId);
-  const userNames = await getUserNamesByIds(rows.map((r) => (r.sales ? r.sales.actorId : null)));
+  const userNames = await getUserNamesByIds(
+    rows.map((r) => (r.sales ? r.sales.actorId : null)),
+  );
 
   return {
     history: rows.map((r) => buildHistoryResponse(r, materialName, userNames)),
@@ -186,7 +198,10 @@ async function updateStock(userId, businessId, stockId, updates) {
   assertWithin24Hours(stock, "updated");
 
   if ((stock.quantity_sold || 0) > 0) {
-    throw httpError(403, "Stock cannot be updated because it has already been used in a sale");
+    throw httpError(
+      403,
+      "Stock cannot be updated because it has already been used in a sale",
+    );
   }
 
   await assertAction(userId, businessId, ACTIONS.UPDATE_STOCKS);
@@ -202,7 +217,9 @@ async function updateStock(userId, businessId, stockId, updates) {
     throw new Error(error.message);
   }
 
-  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialNames = await materialService.getMaterialNamesByIds([
+    stock.materialId,
+  ]);
   const materialName = materialNames.get(stock.materialId) || stock.materialId;
   const changedFields = Object.keys(updates)
     .map((k) => `${k}: "${updates[k]}"`)
@@ -212,8 +229,19 @@ async function updateStock(userId, businessId, stockId, updates) {
     userId,
     "UPDATE_STOCK",
     `Updated stock batch for "${materialName}" — changed ${changedFields}`,
-    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price },
-    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price, ...updates }
+    {
+      id: stock.id,
+      materialId: stock.materialId,
+      quantity: stock.quantity,
+      mfg_price: stock.mfg_price,
+    },
+    {
+      id: stock.id,
+      materialId: stock.materialId,
+      quantity: stock.quantity,
+      mfg_price: stock.mfg_price,
+      ...updates,
+    },
   );
 
   return buildStockResponse(data);
@@ -226,7 +254,10 @@ async function deleteStock(userId, businessId, stockId) {
   assertWithin24Hours(stock, "deleted");
 
   if ((stock.quantity_sold || 0) > 0) {
-    throw httpError(403, "Stock cannot be deleted because it has already been used in a sale");
+    throw httpError(
+      403,
+      "Stock cannot be deleted because it has already been used in a sale",
+    );
   }
 
   await assertAction(userId, businessId, ACTIONS.DELETE_STOCKS);
@@ -255,22 +286,38 @@ async function deleteStock(userId, businessId, stockId) {
       .eq("id", stockId);
 
     if (rollbackError) {
-      console.error("[deleteStock] failed to roll back stock deletion after expense cleanup error:", rollbackError);
+      console.error(
+        "[deleteStock] failed to roll back stock deletion after expense cleanup error:",
+        rollbackError,
+      );
     }
 
     throw new Error(expenseError.message);
   }
 
-  const materialNames = await materialService.getMaterialNamesByIds([stock.materialId]);
+  const materialNames = await materialService.getMaterialNamesByIds([
+    stock.materialId,
+  ]);
   const materialName = materialNames.get(stock.materialId) || stock.materialId;
   recordLog(
     businessId,
     userId,
     "DELETE_STOCK",
     `Deleted stock batch for "${materialName}" (qty: ${stock.quantity}, price: ₱${stock.mfg_price})`,
-    { id: stock.id, materialId: stock.materialId, quantity: stock.quantity, mfg_price: stock.mfg_price },
-    null
+    {
+      id: stock.id,
+      materialId: stock.materialId,
+      quantity: stock.quantity,
+      mfg_price: stock.mfg_price,
+    },
+    null,
   );
 }
 
-module.exports = { VALID_STATUSES, listStocks, getStockHistory, updateStock, deleteStock };
+module.exports = {
+  VALID_STATUSES,
+  listStocks,
+  getStockHistory,
+  updateStock,
+  deleteStock,
+};
