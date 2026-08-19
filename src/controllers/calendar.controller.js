@@ -33,28 +33,55 @@ async function getCalendarOverview(req, res) {
 }
 
 // GET /api/businesses/:businessId/calendar/detail?type=day|month&date=YYYY-MM-DD|YYYY-MM
+// GET /api/businesses/:businessId/calendar/detail?from=YYYY-MM-DD&to=YYYY-MM-DD
 async function getCalendarDetail(req, res) {
-  const { type, date } = req.query;
-
-  if (!type || !["day", "month"].includes(type)) {
-    return res.status(400).json({ error: 'type must be "day" or "month"' });
-  }
-
-  // Validate date format based on type.
-  if (type === "day" && (!/^\d{4}-\d{2}-\d{2}$/.test(date))) {
-    return res.status(400).json({ error: "date must be YYYY-MM-DD for type=day" });
-  }
-  if (type === "month" && (!/^\d{4}-\d{2}$/.test(date))) {
-    return res.status(400).json({ error: "date must be YYYY-MM for type=month" });
-  }
+  const { type, date, from, to } = req.query;
 
   try {
-    const result = await calendarService.getCalendarDetail(
-      req.user.id,
-      req.params.businessId,
-      type,
-      date
-    );
+    let result;
+    
+    if (from && to) {
+      // Custom date range query
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+        return res.status(400).json({ error: "from and to must be valid ISO dates (YYYY-MM-DD)" });
+      }
+      
+      if (new Date(from) > new Date(to)) {
+        return res.status(400).json({ error: "fromDate must be before or equal to toDate" });
+      }
+      
+      result = await calendarService.getCalendarDetailRange(
+        req.user.id,
+        req.params.businessId,
+        from,
+        to
+      );
+    } else if (type && date) {
+      // Existing single date query (backward compatibility)
+      if (!type || !["day", "month"].includes(type)) {
+        return res.status(400).json({ error: 'type must be "day" or "month"' });
+      }
+
+      // Validate date format based on type.
+      if (type === "day" && (!/^\d{4}-\d{2}-\d{2}$/.test(date))) {
+        return res.status(400).json({ error: "date must be YYYY-MM-DD for type=day" });
+      }
+      if (type === "month" && (!/^\d{4}-\d{2}$/.test(date))) {
+        return res.status(400).json({ error: "date must be YYYY-MM for type=month" });
+      }
+
+      result = await calendarService.getCalendarDetail(
+        req.user.id,
+        req.params.businessId,
+        type,
+        date
+      );
+    } else {
+      return res.status(400).json({ 
+        error: 'Either (type and date) or (from and to) parameters required' 
+      });
+    }
+    
     return res.status(200).json(result);
   } catch (err) {
     return sendError(res, err, "getCalendarDetail");
