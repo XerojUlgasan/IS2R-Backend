@@ -257,15 +257,6 @@ async function deleteSale(userId, businessId, saleId) {
     throw mapRpcError(error);
   }
 
-  const { error: deletionError } = await supabase
-    .from("stock_consumption_history")
-    .delete()
-    .eq("saleId", saleId);
-
-  if (deletionError) {
-    console.log("Deletion Invalid");
-  }
-
   const names = await materialService.getMaterialNamesByIds([sale.materialId]);
   const materialName = names.get(sale.materialId) || sale.materialId;
   recordLog(
